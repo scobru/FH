@@ -15,6 +15,7 @@ Named after the town on the bridge in Final Fantasy VIII: built from recycled pa
 - **Share your list.** Signed in, you get a link `#/u/<identity>`: whoever opens it sees your tiles and can add them, one by one or all at once.
 - **App directory** (`#/apps`). A public list of Freenet apps that anyone signed in can add to, with a name and a one-line description. Add an app to your tiles with one click.
 - **Copy your list.** Export the JSON, or import one.
+- **The town on the bridge.** An original background scene (a railway bridge over the sea, a town of recycled parts, a great solar panel, turning windmills; light and dark versions) and an original calm ambient piece played live by the browser (`♪ Music`, off until you press it). Both were made for FH: no artwork or music from the game is included.
 
 ## How it works
 

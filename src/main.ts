@@ -8,6 +8,7 @@ import {
 import { parseName } from "./names";
 import { blockSites, listSite, loadDirectory, resolveName } from "./net";
 import { rows } from "./directory";
+import { startMusic, stopMusic } from "./music";
 
 const app = document.getElementById("home")!;
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -378,6 +379,14 @@ addEventListener("keydown", (ev) => {
     q.focus();
   }
 });
+
+// music is off until asked: browsers only start audio after a click anyway
+const music = document.getElementById("music")!;
+music.onclick = () => {
+  const on = music.getAttribute("aria-pressed") !== "true";
+  music.setAttribute("aria-pressed", String(on));
+  if (on) startMusic(); else stopMusic();
+};
 
 app.innerHTML = `<p class="muted loading">Loading your sites…</p>`;
 const query = new URLSearchParams(location.search);

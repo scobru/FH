@@ -1,14 +1,14 @@
 :root {
   color-scheme: light dark;
   --bg: #f4f1ea; --fg: #1b1f27; --muted: #5d6573; --card: #fffdf8; --line: #e2dccf; --accent: #c2622d; --on-accent: #fff;
-  --sky: linear-gradient(180deg, #f9d9a8 0%, #f4f1ea 70%);
+  --sky1: #8db7dc; --sky2: #f6d6a8; --sea1: #5a8fb8; --sea2: #2c5577; --sun: #fbe3b0; --ink: #2d3a4d; --lit: #fff3c4;
   --serif: ui-serif, "Iowan Old Style", Georgia, serif;
   --mono: ui-monospace, "SF Mono", Menlo, monospace;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #0b1220; --fg: #e8ecf3; --muted: #8a94a8; --card: #121b2d; --line: #1f2a40; --accent: #f0a35e; --on-accent: #0b1220;
-    --sky: linear-gradient(180deg, #1c2b4a 0%, #0b1220 70%);
+    --sky1: #0b1220; --sky2: #2f3c66; --sea1: #1a2a48; --sea2: #0b1220; --sun: #f0a35e; --ink: #050912; --lit: #f0a35e;
   }
 }
 * { box-sizing: border-box; }
@@ -20,7 +20,28 @@ button { cursor: pointer; background: none; border: 0; padding: 0; }
 .muted { color: var(--muted); }
 
 /* home */
-#home { min-height: 100vh; background: var(--sky) no-repeat; padding: 0 16px 48px; }
+#home { position: relative; min-height: 100vh; padding: 0 16px 88px; }
+/* loose text over the scene gets a frosted backing so it stays readable */
+#home > footer, #home > details, #home > h2, #home > p, .group > h2, #list > p {
+  width: fit-content; margin-left: max(0px, calc((100% - 1040px) / 2)); padding: 4px 10px; border-radius: 8px; background: color-mix(in srgb, var(--bg) 82%, transparent); backdrop-filter: blur(6px);
+}
+#home > details[open] { width: auto; }
+
+/* the scene behind everything (index.html) */
+.scene { position: fixed; inset: 0; width: 100%; height: 100%; z-index: 0; pointer-events: none; }
+.sky1 { stop-color: var(--sky1); } .sky2 { stop-color: var(--sky2); } .sea1 { stop-color: var(--sea1); } .sea2 { stop-color: var(--sea2); }
+.scene .sun { fill: var(--sun); stop-color: var(--sun); }
+.scene .ink { fill: var(--ink); }
+.scene .grid, .scene .waves, .scene .reflect { fill: none; stroke: var(--ink); stroke-width: 2; }
+.scene .waves, .scene .reflect { stroke: var(--sun); opacity: .25; }
+.scene .lit { fill: var(--lit); opacity: .8; }
+.mill { transform-box: fill-box; transform-origin: center; animation: spin 14s linear infinite; }
+.windmills > :nth-child(2) .mill { animation-duration: 18s; } .windmills > :nth-child(3) .mill { animation-duration: 11s; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .mill { animation: none; } }
+
+#music { position: fixed; right: 16px; bottom: 16px; z-index: 2; padding: 8px 14px; border-radius: 999px; background: var(--card); color: var(--fg); border: 1px solid var(--line); font-size: .85rem; }
+#music[aria-pressed=true] { background: var(--accent); color: var(--on-accent); border-color: transparent; }
 #home > * { max-width: 1040px; margin-left: auto; margin-right: auto; }
 header { padding: 56px 0 32px; }
 .kicker { margin: 0; font: 600 .72rem var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--accent); }
