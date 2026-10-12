@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "test": "node --test src/sites.test.ts src/whoiam.test.ts"
+    "test": "node --test src/sites.test.ts src/whoiam.test.ts src/names.test.ts src/directory.test.ts"
   },
   "dependencies": {
     "@freenetorg/freenet-stdlib": "latest",

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseLink, parseSites } from "./sites.ts";
+import { moveSite, parseLink, parseSites } from "./sites.ts";
 
 const K = "4dg9mbpxeuMbQhh6Kr2ZjeHFtijMJAK5RoMbxT6rTyMP";
 
@@ -16,16 +16,24 @@ test("parseLink accepts keys and links from any node", () => {
 
 test("parseSites drops junk and duplicates", () => {
   const sites = parseSites(JSON.stringify([
-    { name: " Freefold ", key: K, hash: "#/x" },
+    { name: " Freefold ", key: K, hash: "#/x", group: " Social " },
     { name: "dup", key: K, hash: "" },
     { name: "bad", key: "nope" },
     { key: K.replace("4", "5"), hash: "javascript:x" },
     null,
   ]));
   assert.deepEqual(sites, [
-    { name: "Freefold", key: K, hash: "#/x" },
-    { name: K.replace("4", "5").slice(0, 8), key: K.replace("4", "5"), hash: "" },
+    { name: "Freefold", key: K, hash: "#/x", group: "Social" },
+    { name: K.replace("4", "5").slice(0, 8), key: K.replace("4", "5"), hash: "", group: "" },
   ]);
   assert.deepEqual(parseSites("{"), []);
   assert.deepEqual(parseSites('{"a":1}'), []);
+});
+
+test("moveSite reorders and adopts the neighbour's group", () => {
+  const site = (key: string, group = "") => ({ name: key, key, hash: "", group });
+  const list = [site("a"), site("b", "g"), site("c", "g")];
+  assert.deepEqual(moveSite(list, "a", "c").map((s) => [s.key, s.group]), [["b", "g"], ["a", "g"], ["c", "g"]]);
+  assert.deepEqual(moveSite(list, "b", null).map((s) => s.key), ["a", "c", "b"]);
+  assert.equal(moveSite(list, "a", "a"), list);
 });

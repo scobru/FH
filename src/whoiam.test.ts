@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import * as ed from "@noble/ed25519";
-import { connectMessage, toBase58, verifyProof } from "./whoiam.ts";
+import { connectMessage, fromBase58, toBase58, verifyProof } from "./whoiam.ts";
 
 const hex = ed.etc.bytesToHex;
 
@@ -29,4 +29,11 @@ test("base58 matches an independent computation", () => {
   // computed with Python big integers, not with this code
   const pk = ed.etc.hexToBytes("2a76f1666f3aac4f859a1f35300050b69275202d3b880d9f165083c92818b0b5");
   assert.equal(toBase58(pk), "3rmKPdMLRKZPKpEc2UThti8k4EdxzsAH3j7eWx8GhqYY");
+});
+
+test("base58 round trip", () => {
+  for (const b of [new Uint8Array(32).fill(7), new Uint8Array([0, 0, 1, 2, 255]), new Uint8Array(0)]) {
+    assert.deepEqual(fromBase58(toBase58(b)), b);
+  }
+  assert.equal(fromBase58("0OIl"), null);
 });

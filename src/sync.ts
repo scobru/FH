@@ -5,7 +5,7 @@ import * as ed from "@noble/ed25519";
 import wasmUrl from "./contract.wasm?url";
 import { contract, getJson, putJson, storeGet, storePut, updateJson } from "./store";
 import { connectMessage, verifyProof } from "./whoiam";
-export { personaName } from "./whoiam";
+export { fromBase58, personaName } from "./whoiam";
 
 const { bytesToHex: hex, hexToBytes: unhex } = ed.etc;
 const enc = new TextEncoder();
@@ -15,8 +15,8 @@ interface ListState { list: string; ts: number; sig: string; cert: Cert | null }
 export interface Session { persona: string; cert: Cert; sign: (msg: string) => Promise<string> }
 
 /** The app's own path: delegations and the list's parameters are bound to it (in dev, "/"). */
-const APP_PATH = location.pathname;
-const linkBase = () => `${location.protocol}//${location.host}${APP_PATH}`; // Viso binds its proof to it
+export const APP_PATH = location.pathname;
+export const linkBase = () => `${location.protocol}//${location.host}${APP_PATH}`; // Viso binds its proof to it
 const LINK_MAX_AGE_MS = 10 * 60 * 1000;
 
 const appSecret = async () => {
@@ -93,22 +93,22 @@ export async function currentSession(): Promise<Session | null> {
 }
 
 // ---- the list contract: parameters = persona || app path ----
-const listContract = (me: Session) => contract(wasmUrl, new Uint8Array([...unhex(me.persona), ...enc.encode(APP_PATH)]));
+const listContract = (persona: string) => contract(wasmUrl, new Uint8Array([...unhex(persona), ...enc.encode(APP_PATH)]));
 const paramsHex = (me: Session) => me.persona + hex(enc.encode(APP_PATH));
 const remoteKnown = new Set<string>(); // personas whose list contract this page has seen on the network
 
-/** The persona's published list (JSON) and its time, or null if there is none yet. */
-export async function pull(me: Session): Promise<{ list: string; ts: number } | null> {
-  const s = await getJson<ListState>(await listContract(me));
+/** A persona's published list (JSON) and its time, or null if there is none yet. Anyone can read it. */
+export async function pull(persona: string): Promise<{ list: string; ts: number } | null> {
+  const s = await getJson<ListState>(await listContract(persona));
   if (!s) return null;
-  remoteKnown.add(me.persona);
+  remoteKnown.add(persona);
   return s.ts ? { list: s.list, ts: s.ts } : null;
 }
 
 /** Sign and publish the list. The contract keeps whichever signed list is newest. */
 export async function push(me: Session, list: string, ts: number) {
   const state: ListState = { list, ts, sig: await me.sign(`fhl1|${paramsHex(me)}|${ts}|${list}`), cert: me.cert };
-  const c = await listContract(me);
+  const c = await listContract(me.persona);
   if (remoteKnown.has(me.persona)) await updateJson(c, state);
   else { await putJson(c, state); remoteKnown.add(me.persona); }
 }

@@ -20,6 +20,19 @@ export function toBase58(b: Uint8Array): string {
 }
 export const personaName = (pkHex: string) => toBase58(unhex(pkHex));
 
+/** Base58 back to bytes; null if `s` is not base58. */
+export function fromBase58(s: string): Uint8Array | null {
+  const out: number[] = [];
+  for (const ch of s) {
+    let carry = B58.indexOf(ch);
+    if (carry < 0) return null;
+    for (let i = 0; i < out.length; i++) { carry += out[i] * 58; out[i] = carry & 0xff; carry >>= 8; }
+    while (carry) { out.push(carry & 0xff); carry >>= 8; }
+  }
+  for (const ch of s) { if (ch !== "1") break; out.push(0); }
+  return new Uint8Array(out.reverse());
+}
+
 /** What whoiam signs: "whoiam-connect-v1" || pk || u32le len || base || u32le len || challenge || u64le ts. */
 export function connectMessage(pk: Uint8Array, base: string, challenge: string, ts: number): Uint8Array {
   const parts = [enc.encode("whoiam-connect-v1"), pk];
