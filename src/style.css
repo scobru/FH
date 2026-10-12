@@ -28,6 +28,16 @@ h1 { font: 500 clamp(2rem, 5vw, 3.2rem)/1.1 var(--serif); letter-spacing: -.02em
 .lede { margin: 0; color: var(--muted); max-width: 48ch; }
 .loading { padding-top: 56px; }
 
+.sync { margin-bottom: 20px; padding: 14px 16px; background: var(--card); border: 1px solid var(--line); border-radius: 16px; display: flex; flex-direction: column; gap: 8px; }
+.sync p { margin: 0; }
+.sync code { font: .8rem var(--mono); word-break: break-all; }
+.sync input { flex: 1; min-width: 200px; padding: 7px 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; }
+.sync input:focus { border-color: var(--accent); outline: 0; }
+.wrap { flex-wrap: wrap; }
+.sync button:not(.link) { padding: 7px 14px; border-radius: 999px; background: var(--accent); color: var(--on-accent); font-weight: 600; }
+.sync button.ghost { background: none; color: var(--fg); border: 1px solid var(--line); }
+button.link { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 14px; }
 .tile { position: relative; background: var(--card); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; transition: transform .15s, border-color .15s, box-shadow .15s; }
 .tile:not(.add):hover { transform: translateY(-2px); border-color: hsl(var(--h) 60% 55%); box-shadow: 0 10px 30px -14px hsl(var(--h) 70% 50% / .6); }

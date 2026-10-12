@@ -3,11 +3,14 @@
 // the delegate namespaces its store by the calling app's contract id, so FH's data is FH's alone.
 // Falls back to localStorage (dev server), then to memory for the session.
 import { blake3 } from "@noble/hashes/blake3.js";
-import { FreenetWsApi, DelegateRequest, type DelegateResponse, type ResponseHandler } from "@freenetorg/freenet-stdlib";
-import { ApplicationMessageT } from "@freenetorg/freenet-stdlib/common";
+import {
+  FreenetWsApi, DelegateRequest, ContractKey, ContractContainer, ContractType, WasmContractV1, GetRequest, PutRequest,
+  UpdateRequest, UpdateData, UpdateDataType, DeltaUpdate, type DelegateResponse, type ResponseHandler,
+} from "@freenetorg/freenet-stdlib";
+import { ApplicationMessageT, ContractCodeT } from "@freenetorg/freenet-stdlib/common";
 import {
   ApplicationMessagesT, ClientRequestT, ClientRequestType, DelegateCodeT, DelegateContainerT, DelegateKeyT,
-  DelegateRequestType, DelegateType, InboundDelegateMsgT, InboundDelegateMsgType, RegisterDelegateT, WasmDelegateV1T,
+  DelegateRequestType, DelegateType, InboundDelegateMsgT, InboundDelegateMsgType, RegisterDelegateT, RelatedContractsT, WasmDelegateV1T,
 } from "@freenetorg/freenet-stdlib/client-request";
 import identityWasmUrl from "./identity.wasm?url";
 
@@ -125,3 +128,38 @@ export async function storePut(key: string, value: string) {
   try { localStorage.setItem(lsKey(key), value); } catch { /* sandbox: no storage */ }
   try { await call({ op: "put", key, value }); } catch (e) { if (await delegate()) console.warn("delegate store failed:", e); }
 }
+
+// ---- contracts ----
+
+/** Contract code + key. Instance id = blake3(blake3(wasm) || params), same as freenet-stdlib. */
+export async function contract(wasmUrl: string, params: Uint8Array) {
+  const code = new Uint8Array(await (await fetch(wasmUrl)).arrayBuffer());
+  const codeHash = blake3(code);
+  return { code, codeHash, params, key: new ContractKey(blake3(new Uint8Array([...codeHash, ...params])), codeHash) };
+}
+type Contract = Awaited<ReturnType<typeof contract>>;
+
+const timeout = <T>(p: Promise<T>, ms: number) =>
+  Promise.race([p, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), ms))]);
+
+// get() responses are matched by arrival order: one at a time
+let getChain: Promise<unknown> = Promise.resolve();
+/** A contract's JSON state, or null if the network does not have it (or does not answer in time). */
+export function getJson<T>(c: Contract): Promise<T | null> {
+  const run = () => retrying(async () => {
+    const r = await timeout((await api()).get(new GetRequest(c.key, false)), 30_000);
+    return JSON.parse(new TextDecoder().decode(new Uint8Array(r.state))) as T;
+  }).catch(() => null);
+  const p = getChain.then(run);
+  getChain = p.catch(() => {});
+  return p;
+}
+
+/** Create the contract with this state, or merge it into the existing one. */
+export const putJson = async (c: Contract, state: object) =>
+  (await api()).put(new PutRequest(new ContractContainer(ContractType.WasmContractV1,
+    new WasmContractV1(new ContractCodeT(Array.from(c.code), Array.from(c.codeHash)), Array.from(c.params), c.key)),
+  Array.from(enc.encode(JSON.stringify(state))), new RelatedContractsT()));
+
+export const updateJson = async (c: Contract, delta: object) =>
+  (await api()).update(new UpdateRequest(c.key, new UpdateData(UpdateDataType.DeltaUpdate, new DeltaUpdate(Array.from(enc.encode(JSON.stringify(delta)))))));
