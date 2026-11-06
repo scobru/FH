@@ -2,3 +2,6 @@ node_modules
 dist
 .env.local
 target
+*.mp3
+old-dir-state.json
+

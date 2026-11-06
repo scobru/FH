@@ -51,6 +51,39 @@ export async function listSite(me: Session, site: string, name: string, desc: st
   await updateJson(await directory(), { entries: { [site]: { [me.persona]: entry } } });
 }
 
+/** Remove your listing of a site: sign a deletion entry and mine the proof of work. */
+export async function removeSite(me: Session, site: string) {
+  const e = { name: "", desc: "", ts: Date.now(), deleted: true };
+  const msg = entryMsg(site, me.persona, e);
+  const entry = { ...e, sig: await me.sign(msg), nonce: await mine(msg), cert: me.cert };
+  await loadDirectory();
+  await updateJson(await directory(), { entries: { [site]: { [me.persona]: entry } } });
+}
+
+/** Update a listing: if the site key changed, register the new key and delete the old key atomically. */
+export async function updateSite(me: Session, oldSite: string, newSite: string, name: string, desc: string) {
+  if (oldSite === newSite) {
+    return listSite(me, newSite, name, desc);
+  }
+  const ts = Date.now();
+  const newE = { name: cleanText(name, 60), desc: cleanText(desc, 200), ts };
+  if (!newE.name) throw new Error("A name is needed.");
+  const newMsg = entryMsg(newSite, me.persona, newE);
+  const newEntry = { ...newE, sig: await me.sign(newMsg), nonce: await mine(newMsg), cert: me.cert };
+
+  const delE = { name: "", desc: "", ts: ts + 1, deleted: true };
+  const delMsg = entryMsg(oldSite, me.persona, delE);
+  const delEntry = { ...delE, sig: await me.sign(delMsg), nonce: await mine(delMsg), cert: me.cert };
+
+  await loadDirectory();
+  await updateJson(await directory(), {
+    entries: {
+      [newSite]: { [me.persona]: newEntry },
+      [oldSite]: { [me.persona]: delEntry },
+    },
+  });
+}
+
 /** Admin only: replace the blocklist (site keys hidden from the directory). */
 export async function blockSites(adminSecretHex: string, list: string[]) {
   const ts = Date.now();

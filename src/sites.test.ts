@@ -14,26 +14,29 @@ test("parseLink accepts keys and links from any node", () => {
   assert.equal(parseLink("0OIl" + K.slice(4)), null); // not base58
 });
 
-test("parseSites drops junk and duplicates", () => {
+test("parseSites drops junk and duplicates and preserves group and desc", () => {
+  const longDesc = "a".repeat(250);
   const sites = parseSites(JSON.stringify([
-    { name: " Freefold ", key: K, hash: "#/x", group: " Social " },
+    { name: " Freefold ", key: K, hash: "#/x", group: " Social ", desc: " A private social network " },
     { name: "dup", key: K, hash: "" },
     { name: "bad", key: "nope" },
-    { key: K.replace("4", "5"), hash: "javascript:x" },
+    { key: K.replace("4", "5"), hash: "javascript:x", desc: longDesc },
+    { key: K.replace("4", "6"), desc: 123 },
     null,
   ]));
   assert.deepEqual(sites, [
-    { name: "Freefold", key: K, hash: "#/x", group: "Social" },
-    { name: K.replace("4", "5").slice(0, 8), key: K.replace("4", "5"), hash: "", group: "" },
+    { name: "Freefold", key: K, hash: "#/x", group: "Social", desc: "A private social network" },
+    { name: K.replace("4", "5").slice(0, 8), key: K.replace("4", "5"), hash: "", group: "", desc: "a".repeat(200) },
+    { name: K.replace("4", "6").slice(0, 8), key: K.replace("4", "6"), hash: "", group: "", desc: "" },
   ]);
   assert.deepEqual(parseSites("{"), []);
   assert.deepEqual(parseSites('{"a":1}'), []);
 });
 
 test("moveSite reorders and adopts the neighbour's group", () => {
-  const site = (key: string, group = "") => ({ name: key, key, hash: "", group });
-  const list = [site("a"), site("b", "g"), site("c", "g")];
-  assert.deepEqual(moveSite(list, "a", "c").map((s) => [s.key, s.group]), [["b", "g"], ["a", "g"], ["c", "g"]]);
+  const site = (key: string, group = "", desc = "") => ({ name: key, key, hash: "", group, desc });
+  const list = [site("a"), site("b", "g", "note b"), site("c", "g", "note c")];
+  assert.deepEqual(moveSite(list, "a", "c").map((s) => [s.key, s.group, s.desc]), [["b", "g", "note b"], ["a", "g", ""], ["c", "g", "note c"]]);
   assert.deepEqual(moveSite(list, "b", null).map((s) => s.key), ["a", "c", "b"]);
   assert.equal(moveSite(list, "a", "a"), list);
 });

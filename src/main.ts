@@ -6,7 +6,7 @@ import {
   signOut, startSignIn, type Session,
 } from "./sync";
 import { parseName } from "./names";
-import { blockSites, listSite, loadDirectory, resolveName } from "./net";
+import { blockSites, listSite, loadDirectory, removeSite, resolveName, updateSite } from "./net";
 import { rows } from "./directory";
 import { startMusic, stopMusic } from "./music";
 
@@ -18,6 +18,7 @@ const errText = (e: unknown) => String((e as Error).message ?? e);
 
 let sites: Site[] = [];
 let editing: string | null = null; // key of the site in the form, null = adding
+let editingApp: { site: string; name: string; desc: string } | null = null; // app in directory form, null = adding
 let where = "";
 let me: Session | null | undefined; // undefined = still checking
 let key: string | null = null; // secret of an identity made here, for backup
@@ -52,11 +53,29 @@ async function sync() {
   else { syncMsg = "Synced."; drawSync(); }
 }
 
-/** Add the sites that are not on the list yet; returns how many were added. */
+/** Add the sites that are not on the list yet (or enrich existing sites with missing group/desc); returns how many were added. */
 async function addSites(add: Site[]) {
-  const fresh = add.filter((s) => !sites.some((x) => x.key === s.key));
-  if (fresh.length) { sites = [...sites, ...fresh]; await save(); }
-  return fresh.length;
+  let changed = false;
+  let added = 0;
+  const current = [...sites];
+  for (const s of add) {
+    const idx = current.findIndex((x) => x.key === s.key);
+    if (idx < 0) {
+      current.push(s);
+      added++;
+      changed = true;
+    } else {
+      const existing = current[idx];
+      const newGroup = existing.group || s.group;
+      const newDesc = existing.desc || s.desc;
+      if (newGroup !== existing.group || newDesc !== existing.desc) {
+        current[idx] = { ...existing, group: newGroup, desc: newDesc };
+        changed = true;
+      }
+    }
+  }
+  if (changed) { sites = current; await save(); }
+  return added;
 }
 
 // Viso is a page of its own: inside the node's container, leaving FH goes through the shell.
@@ -108,11 +127,12 @@ function drawSync() {
 // ---------------- tiles ----------------
 // Sites open in a new tab: the node refuses to have its app shells framed (X-Frame-Options: DENY, the shell
 // holds the app's identity token), and a popup escapes FH's sandbox, so the node wraps the site in its own shell.
-const tile = (s: Pick<Site, "name" | "key" | "hash"> & { group?: string }, extra: string) => `
-  <article class="tile" style="--h:${hue(s.key)}" data-key="${s.key}" data-find="${esc(`${s.name} ${s.group ?? ""} ${s.key}`.toLowerCase())}">
+const tile = (s: Pick<Site, "name" | "key" | "hash"> & { group?: string; desc?: string }, extra: string) => `
+  <article class="tile" style="--h:${hue(s.key)}" data-key="${s.key}" data-find="${esc(`${s.name} ${s.group ?? ""} ${s.desc ?? ""} ${s.key}`.toLowerCase())}">
     <a class="face" href="${esc(urlOf(s))}" target="_blank" rel="noopener noreferrer">
       <span class="glyph"><span class="letter">${esc([...s.name][0]?.toUpperCase() ?? "?")}</span><img alt="" loading="lazy" src="${nodeBase}/v1/contract/web/${s.key}/favicon.ico" /></span>
       <span class="name">${esc(s.name)}</span>
+      ${s.desc ? `<span class="desc" title="${esc(s.desc)}">${esc(s.desc)}</span>` : ""}
       <span class="key">${s.key.slice(0, 6)}…${s.key.slice(-4)}${esc(s.hash)}</span>
     </a>${extra}
   </article>`;
@@ -159,6 +179,7 @@ function drawHome() {
         <input name="link" placeholder="Link, key or FreeNames name" required value="${e ? esc(urlOf(e)) : ""}" aria-label="Link, contract key or FreeNames name" />
         <input name="group" placeholder="Group (optional)" maxlength="40" list="groups" value="${esc(e?.group ?? "")}" aria-label="Group" />
         <datalist id="groups">${groups.filter(Boolean).map((g) => `<option value="${esc(g)}"></option>`).join("")}</datalist>
+        <textarea name="desc" placeholder="Description (optional)" maxlength="200" rows="2" aria-label="Description">${esc(e?.desc ?? "")}</textarea>
         <p class="err" id="err" role="alert"></p>
         <div class="row"><button type="submit">${e ? "Save" : "Add"}</button>${e ? `<button type="button" id="cancel">Cancel</button>` : ""}</div>
       </form>
@@ -186,12 +207,22 @@ function drawHome() {
     if (!link) return void (err.textContent = "Paste a Freenet site link (…/v1/contract/web/<key>/), its key, or a FreeNames name.");
     if (link.key !== editing && sites.some((s) => s.key === link.key)) return void (err.textContent = "Already on your list.");
     const name = String(f.get("name")).trim().slice(0, 60) || (parseName(raw) ? raw : link.key.slice(0, 8));
-    const site: Site = { name, ...link, group: String(f.get("group")).trim().slice(0, 40) };
+    const desc = String(f.get("desc") ?? "").trim().slice(0, 200);
+    const site: Site = { name, ...link, group: String(f.get("group")).trim().slice(0, 40), desc };
     sites = editing ? sites.map((s) => (s.key === editing ? site : s)) : [...sites, site];
     editing = null;
     drawHome();
     await save();
   };
+  const descEl = $<HTMLTextAreaElement>("#add textarea[name=desc]");
+  if (descEl) {
+    descEl.onkeydown = (ev) => {
+      if (ev.key === "Enter" && !ev.shiftKey) {
+        ev.preventDefault();
+        $<HTMLFormElement>("#add").requestSubmit();
+      }
+    };
+  }
   app.querySelector<HTMLButtonElement>("#cancel")?.addEventListener("click", () => { editing = null; drawHome(); });
   $<HTMLButtonElement>("#import").onclick = async () => {
     const next = parseSites($<HTMLTextAreaElement>("#json").value);
@@ -242,12 +273,19 @@ async function drawShared(id: string) {
   const shared = parseSites((persona && (await pull(persona))?.list) ?? null);
   if (location.hash !== `#/u/${id}`) return; // the user moved on while it loaded
   const has = (k: string) => sites.some((s) => s.key === k);
+  const groups = [...new Set(shared.map((s) => s.group))];
   app.innerHTML = `
     <p><a href="#/">&larr; Your sites</a></p>
     <header><p class="kicker">Shared list</p><h1>${shared.length} sites from <code>${esc(id.slice(0, 12))}…</code></h1>
       <p class="lede">${persona ? "Open them, or add them to your own list." : "This link is not a valid identity."}</p></header>
-    ${shared.length ? `<p class="row"><button id="all" type="button" class="cta">Add all to my list</button> <span id="msg" class="muted"></span></p>
-      <div class="grid">${shared.map((s) => tile(s, `<div class="acts on"><button data-take="${s.key}" ${has(s.key) ? "disabled" : ""} title="Add to my list" aria-label="Add ${esc(s.name)} to my list">${has(s.key) ? "&#10003;" : "+"}</button></div>`)).join("")}</div>`
+    ${shared.length ? `
+      <p class="row"><button id="all" type="button" class="cta">Add all to my list</button> <span id="msg" class="muted"></span></p>
+      ${shared.length > 3 ? `<input id="q" class="search" type="search" placeholder="Search shared sites (Ctrl+K), Enter opens the first" aria-label="Search shared sites" autocomplete="off" />` : ""}
+      ${groups.map((g) => `
+        <section class="group">
+          ${g ? `<h2>${esc(g)}</h2>` : ""}
+          <div class="grid">${shared.filter((s) => s.group === g).map((s) => tile(s, `<div class="acts on"><button data-take="${s.key}" ${has(s.key) ? "disabled" : ""} title="Add to my list" aria-label="Add ${esc(s.name)} to my list">${has(s.key) ? "&#10003;" : "+"}</button></div>`)).join("")}</div>
+        </section>`).join("")}`
       : persona ? `<p class="muted">Nothing found: the list is empty, or no node answered.</p>` : ""}
     ${footer()}`;
   icons();
@@ -257,6 +295,19 @@ async function drawShared(id: string) {
     await addSites(shared.filter((s) => s.key === b.dataset.take));
     b.disabled = true; b.innerHTML = "&#10003;";
   }));
+  const q = app.querySelector<HTMLInputElement>("#q");
+  if (q) {
+    const filter = () => {
+      const words = q.value.toLowerCase().split(/\s+/).filter(Boolean);
+      app.querySelectorAll<HTMLElement>(".group .tile").forEach((t) => (t.hidden = !words.every((w) => t.dataset.find!.includes(w))));
+      app.querySelectorAll<HTMLElement>(".group").forEach((g) => (g.hidden = !g.querySelector(".tile:not([hidden])")));
+    };
+    q.oninput = filter;
+    q.onkeydown = (ev) => {
+      if (ev.key === "Enter") app.querySelector<HTMLAnchorElement>(".group .tile:not([hidden]) a.face")?.click();
+      if (ev.key === "Escape") { q.value = ""; filter(); }
+    };
+  }
 }
 
 // ---------------- app directory: #/apps ----------------
@@ -267,13 +318,16 @@ async function drawApps() {
       <p class="lede">Sites people listed. Add the ones you want to your list. <span class="muted">The first visit on a node can take up to 30 s.</span></p></header>
     <input id="q" class="search" type="search" placeholder="Search the directory (Ctrl+K)" aria-label="Search the directory" autocomplete="off" />
     <div id="list" class="muted">Loading…</div>
-    <h2>List a site</h2>
+    <h2>${editingApp ? `Edit “${esc(editingApp.name)}”` : "List a site"}</h2>
     <form id="list-form" class="sync">
-      ${me ? `<p class="muted">Listed under your identity, with a few seconds of proof of work against spam. Public and permanent: Freenet has no delete.</p>
-        <div class="row wrap"><input name="link" required placeholder="Link, key or FreeNames name" aria-label="Link, contract key or FreeNames name" /><input name="name" required maxlength="60" placeholder="Name" aria-label="Name" /></div>
-        <div class="row wrap"><input name="desc" maxlength="200" placeholder="What it is, in a line" aria-label="Description" /><button type="submit">List it</button></div>
+      ${me ? `<p class="muted">${editingApp
+        ? "Update this app’s name, description, or link. If you change the link, the new site is registered and the old one is removed from the directory."
+        : "Listed under your identity, with a few seconds of proof of work against spam. Public: you can edit or remove your listing anytime."}</p>
+        <div class="row wrap"><input name="link" required placeholder="Link, key or FreeNames name" aria-label="Link, contract key or FreeNames name" value="${editingApp ? esc(urlOf({ key: editingApp.site, hash: "" })) : ""}" /><input name="name" required maxlength="60" placeholder="Name" aria-label="Name" value="${editingApp ? esc(editingApp.name) : ""}" /></div>
+        <div class="row wrap"><input name="desc" maxlength="200" placeholder="What it is, in a line" aria-label="Description" value="${editingApp ? esc(editingApp.desc) : ""}" /><button type="submit">${editingApp ? "Save changes" : "List it"}</button>
+          ${editingApp ? `<button type="button" id="cancel-edit" class="ghost">Cancel</button><button type="button" id="delete-app" class="ghost danger">Delete listing</button>` : ""}</div>
         <p class="err" id="lmsg" role="alert"></p>`
-      : `<p class="muted">Sign in on <a href="#/">your home page</a> to list a site.</p>`}
+      : `<p class="muted">Sign in on <a href="#/">your home page</a> to list or edit a site.</p>`}
     </form>
     ${footer()}`;
   const form = $<HTMLFormElement>("#list-form");
@@ -281,34 +335,131 @@ async function drawApps() {
     ev.preventDefault();
     const f = new FormData(form), raw = String(f.get("link")).trim(), msg = $("#lmsg");
     try {
-      const site = parseLink(raw)?.key ?? (parseName(raw) ? await resolveName(raw) : null);
+      let site = parseLink(raw)?.key;
+      if (!site && parseName(raw)) {
+        msg.textContent = "Looking up FreeNames name…";
+        site = (await resolveName(raw).catch(() => null)) ?? undefined;
+      }
       if (!site) throw new Error("Not a Freenet site link, key or known FreeNames name.");
-      msg.textContent = "Working (proof of work, a few seconds)…";
-      await listSite(me!, site, String(f.get("name")), String(f.get("desc")));
-      msg.textContent = "Listed. It shows up here once the directory updates.";
+      const name = String(f.get("name")).trim();
+      const desc = String(f.get("desc")).trim();
+      if (!name) throw new Error("A name is needed.");
+
+      if (editingApp) {
+        msg.textContent = "Working (proof of work, updating directory)…";
+        if (editingApp.site === site) {
+          await listSite(me!, site, name, desc);
+        } else {
+          await updateSite(me!, editingApp.site, site, name, desc);
+        }
+        if (sites.some((s) => s.key === editingApp!.site)) {
+          sites = sites.map((s) => (s.key === editingApp!.site ? { ...s, key: site!, name } : s));
+          await save();
+        }
+        editingApp = null;
+        msg.textContent = "Updated.";
+      } else {
+        msg.textContent = "Working (proof of work, a few seconds)…";
+        await listSite(me!, site, name, desc);
+        msg.textContent = "Listed. It shows up here once the directory updates.";
+      }
       form.reset();
+      await drawApps();
     } catch (e) { msg.textContent = errText(e); }
   };
+
+  const cancel = app.querySelector<HTMLButtonElement>("#cancel-edit");
+  if (cancel) cancel.onclick = () => { editingApp = null; drawApps(); };
+
+  const delBtn = app.querySelector<HTMLButtonElement>("#delete-app");
+  if (delBtn && editingApp) {
+    const toDel = editingApp.site, toDelName = editingApp.name;
+    delBtn.onclick = async () => {
+      if (!confirm(`Remove “${toDelName}” from the public directory?`)) return;
+      const msg = $("#lmsg");
+      try {
+        if (msg) msg.textContent = "Removing from directory (proof of work)…";
+        await removeSite(me!, toDel);
+        editingApp = null;
+        await drawApps();
+      } catch (e) {
+        if (msg) msg.textContent = errText(e);
+      }
+    };
+  }
+
   try {
-    const list = rows(await loadDirectory());
+    const dirState = await loadDirectory();
+    const list = rows(dirState);
     if (location.hash !== "#/apps") return; // the user moved on while it loaded
     const has = (k: string) => sites.some((s) => s.key === k);
     $("#list").className = "";
-    $("#list").innerHTML = list.length ? `<ul class="apps">${list.map((r) => `
-      <li data-find="${esc(`${r.name} ${r.desc} ${r.site}`.toLowerCase())}" style="--h:${hue(r.site)}">
-        <a href="${esc(urlOf({ key: r.site, hash: "" }))}" target="_blank" rel="noopener noreferrer"><b>${esc(r.name)}</b></a>
-        <span class="muted">${esc(r.desc)}</span>
-        <small class="muted">${r.count > 1 ? `listed by ${r.count}` : `by ${esc(personaName(r.by).slice(0, 8))}…`}</small>
-        <button data-add="${r.site}" data-name="${esc(r.name)}" type="button" ${has(r.site) ? "disabled" : ""}>${has(r.site) ? "On your list" : "+ Add"}</button>
-      </li>`).join("")}</ul>` : `<p class="muted">No apps listed yet. Be the first, below.</p>`;
+    $("#list").innerHTML = list.length ? `<ul class="apps">${list.map((r) => {
+      const isOwner = !!(me && (r.by === me.persona || dirState.entries[r.site]?.[me.persona]));
+      const onList = has(r.site);
+      const oldTile = !onList ? sites.find((s) => s.name.toLowerCase() === r.name.toLowerCase()) : null;
+      return `
+        <li data-find="${esc(`${r.name} ${r.desc} ${r.site}`.toLowerCase())}" style="--h:${hue(r.site)}">
+          <a href="${esc(urlOf({ key: r.site, hash: "" }))}" target="_blank" rel="noopener noreferrer"><b>${esc(r.name)}</b></a>
+          <span class="muted">${esc(r.desc)}</span>
+          <small class="muted">${r.count > 1 ? `listed by ${r.count}` : `by ${esc(personaName(r.by).slice(0, 8))}…`}</small>
+          <div class="app-acts">
+            ${onList ? `<button disabled type="button">On your list</button>`
+              : oldTile ? `<button data-update-tile="${r.site}" data-old="${oldTile.key}" data-name="${esc(r.name)}" type="button" class="cta" title="Update URL on your home page">Update on list</button>`
+              : `<button data-add="${r.site}" data-name="${esc(r.name)}" data-desc="${esc(r.desc)}" type="button">+ Add</button>`}
+            ${isOwner ? `
+              <button data-edit-app="${r.site}" data-name="${esc(r.name)}" data-desc="${esc(r.desc)}" type="button" class="ghost" title="Edit this listing">Edit</button>
+              <button data-del-app="${r.site}" data-name="${esc(r.name)}" type="button" class="ghost danger" title="Remove from directory">&times;</button>
+            ` : ""}
+          </div>
+        </li>`;
+    }).join("")}</ul>` : `<p class="muted">No apps listed yet. Be the first, below.</p>`;
+
     app.querySelectorAll<HTMLButtonElement>("[data-add]").forEach((b) => (b.onclick = async () => {
-      await addSites([{ name: b.dataset.name!, key: b.dataset.add!, hash: "", group: "" }]);
+      await addSites([{ name: b.dataset.name!, key: b.dataset.add!, hash: "", group: "", desc: b.dataset.desc ?? "" }]);
       b.disabled = true; b.textContent = "On your list";
     }));
-    $<HTMLInputElement>("#q").oninput = (ev) => {
-      const words = (ev.target as HTMLInputElement).value.toLowerCase().split(/\s+/).filter(Boolean);
+
+    app.querySelectorAll<HTMLButtonElement>("[data-update-tile]").forEach((b) => (b.onclick = async () => {
+      const newKey = b.dataset.updateTile!, oldKey = b.dataset.old!, name = b.dataset.name!;
+      sites = sites.map((s) => (s.key === oldKey ? { ...s, key: newKey, name } : s));
+      await save();
+      b.disabled = true;
+      b.textContent = "On your list";
+    }));
+
+    app.querySelectorAll<HTMLButtonElement>("[data-edit-app]").forEach((b) => (b.onclick = () => {
+      editingApp = { site: b.dataset.editApp!, name: b.dataset.name!, desc: b.dataset.desc! };
+      drawApps();
+      $<HTMLElement>("#list-form")?.scrollIntoView({ behavior: "smooth" });
+      $<HTMLInputElement>("input[name=name]")?.focus();
+    }));
+
+    app.querySelectorAll<HTMLButtonElement>("[data-del-app]").forEach((b) => (b.onclick = async () => {
+      const site = b.dataset.delApp!, name = b.dataset.name!;
+      if (!confirm(`Remove “${name}” from the public directory?`)) return;
+      try {
+        const msg = $("#lmsg");
+        if (msg) msg.textContent = "Removing from directory (proof of work)…";
+        await removeSite(me!, site);
+        if (editingApp?.site === site) editingApp = null;
+        await drawApps();
+      } catch (e) {
+        alert(`Could not remove: ${errText(e)}`);
+      }
+    }));
+
+    const q = $<HTMLInputElement>("#q");
+    const filter = () => {
+      const words = q.value.toLowerCase().split(/\s+/).filter(Boolean);
       app.querySelectorAll<HTMLElement>(".apps li").forEach((li) => (li.hidden = !words.every((w) => li.dataset.find!.includes(w))));
     };
+    q.oninput = filter;
+    q.onkeydown = (ev) => {
+      if (ev.key === "Enter") app.querySelector<HTMLAnchorElement>(".apps li:not([hidden]) a")?.click();
+      if (ev.key === "Escape") { q.value = ""; filter(); }
+    };
+    if (q.value) filter();
   } catch (e) { $("#list").textContent = `Could not load the directory: ${errText(e)}`; }
 }
 
@@ -350,6 +501,7 @@ function route() {
   // inside the Freenet container, keep the address bar in sync so the URL is shareable
   if (window.parent !== window) parent.postMessage({ __freenet_shell__: true, type: "hash", hash: location.hash || "#/" }, "*");
   const h = location.hash, u = h.match(/^#\/u\/([1-9A-HJ-NP-Za-km-z]{32,50})$/);
+  if (h !== "#/apps") editingApp = null;
   if (u) return void drawShared(u[1]);
   if (h === "#/apps") return void drawApps();
   if (h === "#/admin") return void drawAdmin();

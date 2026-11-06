@@ -5,7 +5,13 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "test": "node --test src/sites.test.ts src/whoiam.test.ts src/names.test.ts src/directory.test.ts"
+    "test": "node --test src/sites.test.ts src/whoiam.test.ts src/names.test.ts src/directory.test.ts",
+    "publish": "npm run freenet:publish",
+    "update": "npm run freenet:update",
+    "publish:freenet": "powershell -ExecutionPolicy Bypass -File scripts/publish.ps1",
+    "update:freenet": "powershell -ExecutionPolicy Bypass -File scripts/update.ps1",
+    "freenet:publish": "npm run build && fdev website publish dist --key FH",
+    "freenet:update": "npm run build && fdev website update dist --key FH"
   },
   "dependencies": {
     "@freenetorg/freenet-stdlib": "latest",

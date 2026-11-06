@@ -1,5 +1,5 @@
-// A saved site: a Freenet web app, addressed by its contract key, plus an optional in-app route and group.
-export interface Site { name: string; key: string; hash: string; group: string }
+// A saved site: a Freenet web app, addressed by its contract key, plus an optional in-app route, group, and description.
+export interface Site { name: string; key: string; hash: string; group: string; desc: string }
 
 const KEY = /^[1-9A-HJ-NP-Za-km-z]{32,64}$/; // base58 contract key
 
@@ -22,7 +22,8 @@ export function parseSites(json: string | null): Site[] {
     seen.add(s.key);
     const hash = typeof s.hash === "string" && s.hash.startsWith("#") ? s.hash.slice(0, 500) : "";
     const group = typeof s.group === "string" ? s.group.trim().slice(0, 40) : "";
-    return [{ name: (typeof s.name === "string" && s.name.trim().slice(0, 60)) || s.key.slice(0, 8), key: s.key, hash, group }];
+    const desc = typeof s.desc === "string" ? s.desc.trim().slice(0, 200) : "";
+    return [{ name: (typeof s.name === "string" && s.name.trim().slice(0, 60)) || s.key.slice(0, 8), key: s.key, hash, group, desc }];
   });
 }
 

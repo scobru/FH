@@ -22,6 +22,8 @@ pub struct Entry {
     pub nonce: u64,
     pub sig: String, // hex, by the persona's delegated app key over `fhd1|<site>|<persona>|<name>|<desc>|<ts>`
     pub cert: Cert,  // the persona's delegation to that key
+    #[serde(default)]
+    pub deleted: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -47,7 +49,11 @@ pub struct Summary {
 }
 
 pub fn entry_msg(site: &str, persona: &str, e: &Entry) -> String {
-    format!("fhd1|{site}|{persona}|{}|{}|{}", e.name, e.desc, e.ts)
+    if e.deleted {
+        format!("fhd1|{site}|{persona}|[deleted]|{}", e.ts)
+    } else {
+        format!("fhd1|{site}|{persona}|{}|{}|{}", e.name, e.desc, e.ts)
+    }
 }
 
 fn zero_bits(h: &[u8]) -> u32 {
@@ -70,7 +76,10 @@ fn text_ok(s: &str, min: usize, max: usize) -> bool {
 }
 
 fn check_entry(app: &str, site: &str, persona: &str, e: &Entry) -> R<()> {
-    if !is_site(site) || !text_ok(&e.name, 1, MAX_NAME) || !text_ok(&e.desc, 0, MAX_DESC) {
+    if !is_site(site) {
+        return Err("bad entry".into());
+    }
+    if !e.deleted && (!text_ok(&e.name, 1, MAX_NAME) || !text_ok(&e.desc, 0, MAX_DESC)) {
         return Err("bad entry".into());
     }
     let msg = entry_msg(site, persona, e);
@@ -134,7 +143,11 @@ pub fn apply(params: &str, s: &mut DirState, d: DirState) -> R<()> {
             check_entry(&app, &site, &p, &e)?;
             let cur = s.entries.entry(site.clone()).or_default();
             if cur.get(&p).is_none_or(|old| (e.ts, &e.sig) > (old.ts, &old.sig)) {
-                cur.insert(p, e);
+                if e.deleted {
+                    cur.remove(&p);
+                } else {
+                    cur.insert(p, e);
+                }
             }
         }
     }
@@ -240,7 +253,7 @@ mod tests {
         let app_key = sk(100);
         let (base, challenge) = (format!("http://127.0.0.1:7509{app}"), format!("wd1.{}.n1", pk(&app_key)));
         let csig = who.sign(&connect_message(who.verifying_key().as_bytes(), &base, &challenge, 1));
-        let mut e = Entry { name: name.into(), desc: "a site".into(), ts, nonce: 0, sig: String::new(), cert: Cert { base, challenge, ts: 1, sig: hex::encode(csig.to_bytes()) } };
+        let mut e = Entry { name: name.into(), desc: "a site".into(), ts, nonce: 0, sig: String::new(), cert: Cert { base, challenge, ts: 1, sig: hex::encode(csig.to_bytes()) }, deleted: false };
         let msg = entry_msg(site, &pk(who), &e);
         e.sig = hex::encode(app_key.sign(msg.as_bytes()).to_bytes());
         while zero_bits(&Sha256::digest(format!("{msg}|{}", e.nonce).as_bytes())) < POW_BITS {
@@ -288,6 +301,36 @@ mod tests {
         // a blocked site cannot come back
         apply(&p, &mut s, delta_of(SITE, entry(&sk(2), APP, SITE, "Again", 9))).unwrap();
         assert!(s.entries.is_empty());
+        assert!(validate(&p, &s).is_ok());
+    }
+
+    #[test]
+    fn entries_can_be_deleted() {
+        let p = params();
+        let mut s = DirState::default();
+        let (who, e1) = entry(&sk(1), APP, SITE, "Site", 1);
+        apply(&p, &mut s, delta_of(SITE, (who.clone(), e1))).unwrap();
+        assert_eq!(s.entries[SITE].len(), 1);
+
+        let app_key = sk(100);
+        let (base, challenge) = (format!("http://127.0.0.1:7509{APP}"), format!("wd1.{}.n1", pk(&app_key)));
+        let csig = sk(1).sign(&connect_message(sk(1).verifying_key().as_bytes(), &base, &challenge, 1));
+        let mut e_del = Entry {
+            name: String::new(),
+            desc: String::new(),
+            ts: 2,
+            nonce: 0,
+            sig: String::new(),
+            cert: Cert { base, challenge, ts: 1, sig: hex::encode(csig.to_bytes()) },
+            deleted: true,
+        };
+        let msg = entry_msg(SITE, &pk(&sk(1)), &e_del);
+        e_del.sig = hex::encode(app_key.sign(msg.as_bytes()).to_bytes());
+        while zero_bits(&Sha256::digest(format!("{msg}|{}", e_del.nonce).as_bytes())) < POW_BITS {
+            e_del.nonce += 1;
+        }
+        apply(&p, &mut s, delta_of(SITE, (who, e_del))).unwrap();
+        assert!(s.entries.get(SITE).is_none());
         assert!(validate(&p, &s).is_ok());
     }
 }
