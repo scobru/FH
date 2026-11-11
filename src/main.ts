@@ -7,7 +7,7 @@ import {
 } from "./sync";
 import { parseName } from "./names";
 import { blockSites, DIRECTORY_ADMIN, listSite, loadDirectory, removeSite, resolveName, updateSite } from "./net";
-import { rows } from "./directory";
+import { dirDescriptions, resolveDesc, rows, type DirDescs } from "./directory";
 import { startMusic, stopMusic } from "./music";
 
 const app = document.getElementById("home")!;
@@ -27,6 +27,11 @@ let viewMode: "tiles" | "minimal" = "tiles";
 try {
   const saved = localStorage.getItem("fh-view");
   if (saved === "tiles" || saved === "minimal") viewMode = saved;
+} catch { /* sandbox: no storage */ }
+let dirDescs: DirDescs = { byKey: {}, byName: {} };
+try {
+  const savedDir = localStorage.getItem("fh-dir-cache");
+  if (savedDir) dirDescs = JSON.parse(savedDir);
 } catch { /* sandbox: no storage */ }
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "general";
 
@@ -133,15 +138,18 @@ function drawSync() {
 // ---------------- tiles ----------------
 // Sites open in a new tab: the node refuses to have its app shells framed (X-Frame-Options: DENY, the shell
 // holds the app's identity token), and a popup escapes FH's sandbox, so the node wraps the site in its own shell.
-const tile = (s: Pick<Site, "name" | "key" | "hash"> & { group?: string; desc?: string }, extra: string) => `
-  <article class="tile" style="--h:${hue(s.key)}" data-key="${s.key}" data-find="${esc(`${s.name} ${s.group ?? ""} ${s.desc ?? ""} ${s.key}`.toLowerCase())}">
+const tile = (s: Pick<Site, "name" | "key" | "hash"> & { group?: string; desc?: string }, extra: string) => {
+  const desc = resolveDesc(s, dirDescs);
+  return `
+  <article class="tile" style="--h:${hue(s.key)}" data-key="${s.key}" data-find="${esc(`${s.name} ${s.group ?? ""} ${desc} ${s.key}`.toLowerCase())}">
     <a class="face" href="${esc(urlOf(s))}" target="_blank" rel="noopener noreferrer">
       <span class="glyph"><span class="letter">${esc([...s.name][0]?.toUpperCase() ?? "?")}</span><img alt="" loading="lazy" src="${nodeBase}/v1/contract/web/${s.key}/favicon.ico" /></span>
       <span class="name">${esc(s.name)}</span>
-      ${s.desc ? `<span class="desc" title="${esc(s.desc)}">${esc(s.desc)}</span>` : ""}
+      ${desc ? `<span class="desc" title="${esc(desc)}">${esc(desc)}</span>` : ""}
       <span class="key">${s.key.slice(0, 6)}…${s.key.slice(-4)}${esc(s.hash)}</span>
     </a>${extra}
   </article>`;
+};
 
 /** Show a site's favicon where it has one; keep the letter otherwise. */
 function icons() {
@@ -160,6 +168,7 @@ function drawHome() {
   const groups = [...new Set(sites.map((s) => s.group))];
   document.body.classList.toggle("minimal-mode", viewMode === "minimal");
 
+  const eDesc = e ? resolveDesc(e, dirDescs) : "";
   const formHtml = `
     <div class="grid">
       <form class="tile add" id="add">
@@ -168,7 +177,7 @@ function drawHome() {
         <input name="link" placeholder="Link, key or FreeNames name" required value="${e ? esc(urlOf(e)) : ""}" aria-label="Link, contract key or FreeNames name" />
         <input name="group" placeholder="Group (optional)" maxlength="40" list="groups" value="${esc(e?.group ?? "")}" aria-label="Group" />
         <datalist id="groups">${groups.filter(Boolean).map((g) => `<option value="${esc(g)}"></option>`).join("")}</datalist>
-        <textarea name="desc" placeholder="Description (optional)" maxlength="200" rows="2" aria-label="Description">${esc(e?.desc ?? "")}</textarea>
+        <textarea name="desc" placeholder="${e && !e.desc && eDesc ? `Description (inherited: ${esc(eDesc)})` : "Description (optional)"}" maxlength="200" rows="2" aria-label="Description">${esc(e?.desc ?? "")}</textarea>
         <p class="err" id="err" role="alert"></p>
         <div class="row"><button type="submit">${e ? "Save" : "Add"}</button>${e ? `<button type="button" id="cancel">Cancel</button>` : ""}</div>
       </form>
@@ -235,16 +244,19 @@ function drawHome() {
               <section class="lh-section" id="cat-${slug(g)}" data-group="${esc(g)}">
                 <h2>${esc(g || "General")}</h2>
                 <ul class="lh-list">
-                  ${sites.filter((s) => s.group === g).map((s) => `
-                    <li class="lh-item" data-find="${esc(`${s.name} ${s.group ?? ""} ${s.desc ?? ""} ${s.key}`.toLowerCase())}">
+                  ${sites.filter((s) => s.group === g).map((s) => {
+                    const desc = resolveDesc(s, dirDescs);
+                    return `
+                    <li class="lh-item" data-find="${esc(`${s.name} ${s.group ?? ""} ${desc} ${s.key}`.toLowerCase())}">
                       <a class="lh-link" href="${esc(urlOf(s))}" target="_blank" rel="noopener noreferrer">${esc(s.name)}</a>
-                      ${s.desc ? `<span class="lh-desc">${esc(s.desc)}</span>` : ""}
+                      ${desc ? `<span class="lh-desc">${esc(desc)}</span>` : ""}
                       <div class="lh-acts">
                         <button data-edit="${s.key}" title="Edit" aria-label="Edit ${esc(s.name)}">&#9998;</button>
                         <button data-del="${s.key}" title="Remove" aria-label="Remove ${esc(s.name)}">&times;</button>
                       </div>
                     </li>
-                  `).join("")}
+                  `;
+                  }).join("")}
                 </ul>
               </section>`).join("")}
           </div>
@@ -506,6 +518,9 @@ async function drawApps() {
 
   try {
     const dirState = await loadDirectory();
+    dirDescs = dirDescriptions(dirState);
+    try { localStorage.setItem("fh-dir-cache", JSON.stringify(dirDescs)); } catch { /* sandbox */ }
+    storePut("dir-cache", JSON.stringify(dirDescs)).catch(() => {});
     const list = rows(dirState);
     if (location.hash !== "#/apps") return; // the user moved on while it loaded
     const has = (k: string) => sites.some((s) => s.key === k);
@@ -623,6 +638,9 @@ async function drawAdmin() {
   };
   try {
     const d = await loadDirectory();
+    dirDescs = dirDescriptions(d);
+    try { localStorage.setItem("fh-dir-cache", JSON.stringify(dirDescs)); } catch { /* sandbox */ }
+    storePut("dir-cache", JSON.stringify(dirDescs)).catch(() => {});
     if (bl) bl.value = d.blocked.list.join("\n");
     const list = rows(d);
     $("#listed").className = "";
@@ -703,9 +721,23 @@ if (query.has("viso") || query.has("whoiam")) { // back from Viso with its proof
 sites = parseSites(await storeGet("sites"));
 const savedView = await storeGet("view-mode");
 if (savedView === "tiles" || savedView === "minimal") viewMode = savedView;
+const cachedDir = await storeGet("dir-cache");
+if (cachedDir) {
+  try { dirDescs = JSON.parse(cachedDir); } catch { /* ignore */ }
+}
 where = { node: "Saved on your Freenet node", browser: "Saved in this browser", session: "Not saved: lost on reload" }[await persistence()];
 me = await currentSession().catch(() => null); // before the first draw: the directory's form depends on it
 key = me ? await localIdentityKey() : null;
 addEventListener("hashchange", route);
 route();
 await sync();
+
+// Load the app directory in background to inherit descriptions and keep cache fresh
+loadDirectory().then(async (dirState) => {
+  dirDescs = dirDescriptions(dirState);
+  try { localStorage.setItem("fh-dir-cache", JSON.stringify(dirDescs)); } catch { /* sandbox */ }
+  await storePut("dir-cache", JSON.stringify(dirDescs));
+  if ((!location.hash || location.hash === "#/") && !editing && !document.activeElement?.closest("input, textarea")) {
+    drawHome();
+  }
+}).catch((e) => console.warn("Background directory sync failed:", e));

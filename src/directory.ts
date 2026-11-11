@@ -38,3 +38,42 @@ export function rows(s: DirState): Row[] {
     return [{ site, name: e.name, desc: e.desc, by, count: all.length, ts: Math.max(...all.map(([, x]) => x.ts)) }];
   }).sort((a, b) => b.ts - a.ts);
 }
+
+export interface DirDescs {
+  byKey: Record<string, string>;
+  byName: Record<string, string>;
+}
+
+export const KNOWN_APP_DESCS: Record<string, string> = {
+  "fishermans horizon": "Your Freenet, in one place.",
+  "fisherman's horizon": "Your Freenet, in one place.",
+};
+
+/** Index descriptions from directory state by site key and normalized name. */
+export function dirDescriptions(s: DirState): DirDescs {
+  const byKey: Record<string, string> = {};
+  const byName: Record<string, string> = {};
+  for (const r of rows(s)) {
+    if (r.desc) {
+      if (r.site) byKey[r.site] = r.desc;
+      if (r.name) byName[r.name.trim().toLowerCase()] = r.desc;
+    }
+  }
+  return { byKey, byName };
+}
+
+/** If a site has no custom description, inherit it from the directory (by key or name) or known apps. */
+export function resolveDesc(
+  site: { key?: string; name?: string; desc?: string },
+  descs?: DirDescs | null
+): string {
+  if (site.desc?.trim()) return site.desc.trim();
+  if (descs) {
+    if (site.key && descs.byKey[site.key]) return descs.byKey[site.key];
+    const norm = site.name?.trim().toLowerCase();
+    if (norm && descs.byName[norm]) return descs.byName[norm];
+  }
+  const norm = site.name?.trim().toLowerCase();
+  if (norm && KNOWN_APP_DESCS[norm]) return KNOWN_APP_DESCS[norm];
+  return "";
+}

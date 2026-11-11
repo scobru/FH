@@ -4,4 +4,5 @@ dist
 target
 *.mp3
 old-dir-state.json
+graphify-out
 

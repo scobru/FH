@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { cleanText, entryMsg, mine, rows, workOf, type DirState } from "./directory.ts";
+import { cleanText, dirDescriptions, entryMsg, mine, resolveDesc, rows, workOf, type DirState } from "./directory.ts";
 
-const e = (name: string, ts: number) => ({ name, desc: "", ts, nonce: 0, sig: "", cert: { base: "", challenge: "", ts: 0, sig: "" } });
+const e = (name: string, ts: number, desc = "") => ({ name, desc, ts, nonce: 0, sig: "", cert: { base: "", challenge: "", ts: 0, sig: "" } });
 
 test("rows: one per site, earliest entry speaks, blocked sites hidden", () => {
   const s: DirState = {
@@ -29,4 +29,44 @@ test("rows ignore deleted entries", () => {
     blocked: { ts: 0, list: [], sig: "" },
   };
   assert.deepEqual(rows(s).map((r) => r.site), ["siteB"]);
+});
+
+test("dirDescriptions indexes descriptions by site key and lowercased name", () => {
+  const s: DirState = {
+    entries: {
+      site1: { p1: e("FreePolls", 1, "Polls on Freenet") },
+      site2: { p1: e("FreeBird", 2, "Twitterish experiment") },
+    },
+    blocked: { ts: 0, list: [], sig: "" },
+  };
+  const descs = dirDescriptions(s);
+  assert.equal(descs.byKey["site1"], "Polls on Freenet");
+  assert.equal(descs.byKey["site2"], "Twitterish experiment");
+  assert.equal(descs.byName["freepolls"], "Polls on Freenet");
+  assert.equal(descs.byName["freebird"], "Twitterish experiment");
+});
+
+test("resolveDesc prioritizes explicit user desc, then directory by key, then by name, then known apps", () => {
+  const descs = {
+    byKey: { key1: "Directory desc for key1" },
+    byName: { freepolls: "Directory desc for FreePolls" },
+  };
+
+  // Explicit user description wins
+  assert.equal(resolveDesc({ key: "key1", name: "FreePolls", desc: "User custom desc" }, descs), "User custom desc");
+
+  // Inherits by key when desc is empty
+  assert.equal(resolveDesc({ key: "key1", name: "Other", desc: "" }, descs), "Directory desc for key1");
+  assert.equal(resolveDesc({ key: "key1", name: "Other" }, descs), "Directory desc for key1");
+
+  // Inherits by name when key is not in directory
+  assert.equal(resolveDesc({ key: "keyUnknown", name: "FreePolls", desc: "" }, descs), "Directory desc for FreePolls");
+  assert.equal(resolveDesc({ key: "keyUnknown", name: "  freepolls  " }, descs), "Directory desc for FreePolls");
+
+  // Fallback to known app (e.g. Fishermans Horizon)
+  assert.equal(resolveDesc({ key: "fhKey", name: "Fishermans Horizon", desc: "" }, descs), "Your Freenet, in one place.");
+  assert.equal(resolveDesc({ key: "fhKey", name: "Fisherman's Horizon" }, descs), "Your Freenet, in one place.");
+
+  // Returns empty string when no match
+  assert.equal(resolveDesc({ key: "keyUnknown", name: "UnknownApp", desc: "" }, descs), "");
 });

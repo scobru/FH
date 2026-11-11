@@ -292,6 +292,7 @@ body.minimal-mode #home { max-width: 1400px; padding: 24px 20px 88px; }
 .lh-desc {
   font-size: .82rem;
   color: var(--muted);
+  word-break: break-word;
 }
 
 .lh-acts {
