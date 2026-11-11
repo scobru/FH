@@ -31,6 +31,8 @@ pub struct Blocklist {
     pub ts: u64,
     pub list: Vec<String>, // site keys
     pub sig: String,       // hex, by admin over `fhb1|<ts>|<list joined by ,>`
+    #[serde(default)]
+    pub cert: Option<Cert>, // delegation from the admin persona for this app path
 }
 
 /// Also the delta: an update carries the entries and blocklist to merge.
@@ -90,14 +92,20 @@ fn check_entry(app: &str, site: &str, persona: &str, e: &Entry) -> R<()> {
     Ok(())
 }
 
-fn check_blocklist(admin: &str, b: &Blocklist) -> R<()> {
+fn check_blocklist(admin: &str, app: &str, b: &Blocklist) -> R<()> {
     if *b == Blocklist::default() {
         return Ok(()); // initial empty state
     }
     if b.list.len() > 10_000 || !b.list.iter().all(|s| is_site(s)) {
         return Err("bad blocklist".into());
     }
-    verify(&key(admin)?, format!("fhb1|{}|{}", b.ts, b.list.join(",")).as_bytes(), &b.sig)
+    let msg = format!("fhb1|{}|{}", b.ts, b.list.join(","));
+    if let Some(cert) = &b.cert {
+        let app_key = check(admin, app, cert)?;
+        verify(&app_key, msg.as_bytes(), &b.sig)
+    } else {
+        verify(&key(admin)?, msg.as_bytes(), &b.sig)
+    }
 }
 
 fn split(params: &str) -> R<(String, String)> {
@@ -124,7 +132,7 @@ fn prune(s: &mut DirState, max: usize) {
 
 pub fn validate(params: &str, s: &DirState) -> R<()> {
     let (admin, app) = split(params)?;
-    check_blocklist(&admin, &s.blocked)?;
+    check_blocklist(&admin, &app, &s.blocked)?;
     if s.entries.values().map(BTreeMap::len).sum::<usize>() > MAX_ENTRIES || s.entries.keys().any(|k| s.blocked.list.contains(k)) {
         return Err("state out of bounds".into());
     }
@@ -135,7 +143,7 @@ pub fn validate(params: &str, s: &DirState) -> R<()> {
 pub fn apply(params: &str, s: &mut DirState, d: DirState) -> R<()> {
     let (admin, app) = split(params)?;
     if d.blocked.ts > s.blocked.ts {
-        check_blocklist(&admin, &d.blocked)?;
+        check_blocklist(&admin, &app, &d.blocked)?;
         s.blocked = d.blocked;
     }
     for (site, m) in d.entries {
@@ -294,12 +302,35 @@ mod tests {
         apply(&p, &mut s, delta_of(SITE, entry(&sk(1), APP, SITE, "Site", 1))).unwrap();
         let list = vec![SITE.to_string()];
         let sig = |k: &SigningKey| hex::encode(k.sign(format!("fhb1|5|{}", list.join(",")).as_bytes()).to_bytes());
-        let forged = DirState { blocked: Blocklist { ts: 5, list: list.clone(), sig: sig(&sk(1)) }, ..Default::default() };
+        let forged = DirState { blocked: Blocklist { ts: 5, list: list.clone(), sig: sig(&sk(1)), cert: None }, ..Default::default() };
         assert!(apply(&p, &mut s, forged).is_err());
-        apply(&p, &mut s, DirState { blocked: Blocklist { ts: 5, list: list.clone(), sig: sig(&sk(99)) }, ..Default::default() }).unwrap();
+        apply(&p, &mut s, DirState { blocked: Blocklist { ts: 5, list: list.clone(), sig: sig(&sk(99)), cert: None }, ..Default::default() }).unwrap();
         assert!(s.entries.is_empty());
         // a blocked site cannot come back
         apply(&p, &mut s, delta_of(SITE, entry(&sk(2), APP, SITE, "Again", 9))).unwrap();
+        assert!(s.entries.is_empty());
+        assert!(validate(&p, &s).is_ok());
+    }
+
+    #[test]
+    fn the_admin_blocklist_works_with_viso_delegation() {
+        let p = params(); // admin is sk(99)
+        let mut s = DirState::default();
+        apply(&p, &mut s, delta_of(SITE, entry(&sk(1), APP, SITE, "Site", 1))).unwrap();
+        assert_eq!(s.entries[SITE].len(), 1);
+
+        let app_key = sk(101);
+        let base = format!("http://127.0.0.1:7509{APP}");
+        let challenge = format!("wd1.{}.n2", pk(&app_key));
+        let csig = sk(99).sign(&connect_message(sk(99).verifying_key().as_bytes(), &base, &challenge, 1));
+        let cert = Cert { base, challenge, ts: 1, sig: hex::encode(csig.to_bytes()) };
+
+        let list = vec![SITE.to_string()];
+        let msg = format!("fhb1|6|{}", list.join(","));
+        let sig = hex::encode(app_key.sign(msg.as_bytes()).to_bytes());
+        let blocked = Blocklist { ts: 6, list, sig, cert: Some(cert) };
+
+        apply(&p, &mut s, DirState { blocked, ..Default::default() }).unwrap();
         assert!(s.entries.is_empty());
         assert!(validate(&p, &s).is_ok());
     }

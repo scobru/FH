@@ -5,7 +5,7 @@ import registryWasm from "./fn-registry.wasm?url";
 import * as ed from "@noble/ed25519";
 import directoryWasm from "./directory.wasm?url";
 import { contract, getJson, putJson, updateJson } from "./store";
-import { APP_PATH, type Session } from "./sync";
+import { APP_PATH, type Cert, type Session } from "./sync";
 import { EMPTY_DIR, blockMsg, cleanText, entryMsg, mine, type DirState } from "./directory";
 import { FREENAMES_PATH, REGISTRY_ADMIN, isKey, parseName, resolveOwner, type RegState, type Zone } from "./names";
 
@@ -28,8 +28,8 @@ export async function resolveName(input: string): Promise<string | null> {
 
 // ---- app directory (directory/src/lib.rs): one instance, parameters = admin key || FH's app path ----
 
-/** The directory admin: the same key as FreePolls' directory (the signed messages are domain-separated). */
-export const DIRECTORY_ADMIN = "4f3738821e50c271f498aa23a5a569802a418768c84d2a6bd7f643a2d3359d6c";
+/** The directory admin: associated with the admin Viso persona (5jQAw8QEzaWvC1ZZKnjQwgv7dtCZ9X8vHjTheCRBBygN). */
+export const DIRECTORY_ADMIN = "464b576da4cc5bcf31febd41a863ac251d04024c19f1786b24ca6620a0cce53b";
 const directory = () => contract(directoryWasm, new Uint8Array([...hexToBytes(DIRECTORY_ADMIN), ...enc.encode(APP_PATH)]));
 
 /** Load the directory. The first visitor on a node creates it (empty). */
@@ -84,10 +84,18 @@ export async function updateSite(me: Session, oldSite: string, newSite: string, 
   });
 }
 
-/** Admin only: replace the blocklist (site keys hidden from the directory). */
-export async function blockSites(adminSecretHex: string, list: string[]) {
+/** Admin only: replace the blocklist (site keys hidden from the directory). Supports Viso session or admin secret hex. */
+export async function blockSites(admin: Session | string, list: string[]) {
   const ts = Date.now();
-  const sig = ed.etc.bytesToHex(await ed.signAsync(enc.encode(blockMsg({ ts, list })), hexToBytes(adminSecretHex)));
+  const msg = blockMsg({ ts, list });
+  let sig: string;
+  let cert: Cert | undefined;
+  if (typeof admin === "string") {
+    sig = ed.etc.bytesToHex(await ed.signAsync(enc.encode(msg), hexToBytes(admin)));
+  } else {
+    sig = await admin.sign(msg);
+    cert = admin.cert;
+  }
   await loadDirectory();
-  await updateJson(await directory(), { blocked: { ts, list, sig } });
+  await updateJson(await directory(), { blocked: { ts, list, sig, ...(cert ? { cert } : {}) } });
 }

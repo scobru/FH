@@ -4,7 +4,7 @@ import type { Cert } from "./sync";
 
 export const POW_BITS = 18; // must match the contract (sha256, a few seconds in the browser)
 export interface DirEntry { name: string; desc: string; ts: number; nonce: number; sig: string; cert: Cert; deleted?: boolean }
-export interface Blocklist { ts: number; list: string[]; sig: string }
+export interface Blocklist { ts: number; list: string[]; sig: string; cert?: Cert }
 export interface DirState { entries: Record<string, Record<string, DirEntry>>; blocked: Blocklist } // site -> persona -> entry
 export const EMPTY_DIR: DirState = { entries: {}, blocked: { ts: 0, list: [], sig: "" } };
 

@@ -6,7 +6,7 @@ import {
   signOut, startSignIn, type Session,
 } from "./sync";
 import { parseName } from "./names";
-import { blockSites, listSite, loadDirectory, removeSite, resolveName, updateSite } from "./net";
+import { blockSites, DIRECTORY_ADMIN, listSite, loadDirectory, removeSite, resolveName, updateSite } from "./net";
 import { rows } from "./directory";
 import { startMusic, stopMusic } from "./music";
 
@@ -23,6 +23,12 @@ let where = "";
 let me: Session | null | undefined; // undefined = still checking
 let key: string | null = null; // secret of an identity made here, for backup
 let syncMsg = "";
+let viewMode: "tiles" | "minimal" = "tiles";
+try {
+  const saved = localStorage.getItem("fh-view");
+  if (saved === "tiles" || saved === "minimal") viewMode = saved;
+} catch { /* sandbox: no storage */ }
+const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "general";
 
 // ---------------- saving and sync ----------------
 const keepLocal = async (ts: number) => { await storePut("sites", JSON.stringify(sites)); await storePut("sites-ts", String(ts)); };
@@ -152,26 +158,9 @@ const footer = () => `<footer><span class="muted">${where}</span> &middot;
 function drawHome() {
   const e = editing ? sites.find((s) => s.key === editing) : undefined;
   const groups = [...new Set(sites.map((s) => s.group))];
-  const acts = (s: Site) => `
-    <div class="acts">
-      <button data-left="${s.key}" title="Move left" aria-label="Move ${esc(s.name)} left">&larr;</button>
-      <button data-right="${s.key}" title="Move right" aria-label="Move ${esc(s.name)} right">&rarr;</button>
-      <button data-edit="${s.key}" title="Edit" aria-label="Edit ${esc(s.name)}">&#9998;</button>
-      <button data-del="${s.key}" title="Remove" aria-label="Remove ${esc(s.name)}">&times;</button>
-    </div>`;
-  app.innerHTML = `
-    <header>
-      <p class="kicker">Fisherman's Horizon</p>
-      <h1>Your Freenet, in one place.</h1>
-      <p class="lede">Pin the sites you use and open them from one place. <a href="#/apps">Find apps &rarr;</a></p>
-    </header>
-    <section id="sync" class="sync"></section>
-    ${sites.length ? `<input id="q" class="search" type="search" placeholder="Search your sites (Ctrl+K), Enter opens the first" aria-label="Search your sites" autocomplete="off" />` : ""}
-    ${groups.map((g) => `
-      <section class="group">
-        ${g ? `<h2>${esc(g)}</h2>` : ""}
-        <div class="grid">${sites.filter((s) => s.group === g).map((s) => tile(s, acts(s))).join("")}</div>
-      </section>`).join("")}
+  document.body.classList.toggle("minimal-mode", viewMode === "minimal");
+
+  const formHtml = `
     <div class="grid">
       <form class="tile add" id="add">
         <p class="label">${e ? "Edit site" : "Add a site"}</p>
@@ -183,17 +172,129 @@ function drawHome() {
         <p class="err" id="err" role="alert"></p>
         <div class="row"><button type="submit">${e ? "Save" : "Add"}</button>${e ? `<button type="button" id="cancel">Cancel</button>` : ""}</div>
       </form>
-    </div>
+    </div>`;
+
+  const copyListHtml = `
     <details>
       <summary>Copy your list</summary>
       <p class="muted">Export it, or paste a list here and import it (it replaces the current one).</p>
       <textarea id="json" rows="6" spellcheck="false" aria-label="Your list as JSON">${esc(JSON.stringify(sites, null, 1))}</textarea>
       <button id="import" type="button">Import</button>
-    </details>
-    ${footer()}`;
+    </details>`;
+
+  if (viewMode === "tiles") {
+    const acts = (s: Site) => `
+      <div class="acts">
+        <button data-left="${s.key}" title="Move left" aria-label="Move ${esc(s.name)} left">&larr;</button>
+        <button data-right="${s.key}" title="Move right" aria-label="Move ${esc(s.name)} right">&rarr;</button>
+        <button data-edit="${s.key}" title="Edit" aria-label="Edit ${esc(s.name)}">&#9998;</button>
+        <button data-del="${s.key}" title="Remove" aria-label="Remove ${esc(s.name)}">&times;</button>
+      </div>`;
+
+    app.innerHTML = `
+      <header>
+        <div class="header-top">
+          <p class="kicker">Fisherman's Horizon</p>
+          <button id="toggle-view" class="view-toggle" type="button" title="Switch to Minimal view">&#9776; Minimal</button>
+        </div>
+        <h1>Your Freenet, in one place.</h1>
+        <p class="lede">Pin the sites you use and open them from one place. <a href="#/apps">Find apps &rarr;</a></p>
+      </header>
+      <section id="sync" class="sync"></section>
+      ${sites.length ? `<input id="q" class="search" type="search" placeholder="Search your sites (Ctrl+K), Enter opens the first" aria-label="Search your sites" autocomplete="off" />` : ""}
+      ${groups.map((g) => `
+        <section class="group">
+          ${g ? `<h2>${esc(g)}</h2>` : ""}
+          <div class="grid">${sites.filter((s) => s.group === g).map((s) => tile(s, acts(s))).join("")}</div>
+        </section>`).join("")}
+      ${formHtml}
+      ${copyListHtml}
+      ${footer()}`;
+  } else {
+    // Minimal (Linkhorse) mode
+    app.innerHTML = `
+      <div class="lh-layout">
+        <aside class="lh-sidebar">
+          <div class="lh-brand">
+            <span class="lh-title">Fisherman's Horizon</span>
+            <button id="toggle-view" class="view-toggle" type="button" title="Switch to Tiles view">&#8862; Tiles</button>
+          </div>
+          <button id="lh-add-btn" class="lh-add-btn" type="button">+ Add Link</button>
+          <nav class="lh-nav">
+            ${groups.map((g) => `<a href="#cat-${slug(g)}" data-group="${esc(g)}">${esc(g || "General")}</a>`).join("")}
+          </nav>
+          <div class="muted" style="margin-top:auto; font-size:.85rem; padding-top:16px;">
+            <a href="#/apps">Apps directory &rarr;</a>
+          </div>
+        </aside>
+        <main class="lh-main">
+          <section id="sync" class="sync"></section>
+          ${sites.length ? `<input id="q" class="search" type="search" placeholder="Search your sites (Ctrl+K), Enter opens the first" aria-label="Search your sites" autocomplete="off" />` : ""}
+          <div class="lh-groups">
+            ${groups.map((g) => `
+              <section class="lh-section" id="cat-${slug(g)}" data-group="${esc(g)}">
+                <h2>${esc(g || "General")}</h2>
+                <ul class="lh-list">
+                  ${sites.filter((s) => s.group === g).map((s) => `
+                    <li class="lh-item" data-find="${esc(`${s.name} ${s.group ?? ""} ${s.desc ?? ""} ${s.key}`.toLowerCase())}">
+                      <a class="lh-link" href="${esc(urlOf(s))}" target="_blank" rel="noopener noreferrer">${esc(s.name)}</a>
+                      ${s.desc ? `<span class="lh-desc">${esc(s.desc)}</span>` : ""}
+                      <div class="lh-acts">
+                        <button data-edit="${s.key}" title="Edit" aria-label="Edit ${esc(s.name)}">&#9998;</button>
+                        <button data-del="${s.key}" title="Remove" aria-label="Remove ${esc(s.name)}">&times;</button>
+                      </div>
+                    </li>
+                  `).join("")}
+                </ul>
+              </section>`).join("")}
+          </div>
+          ${formHtml}
+          ${copyListHtml}
+          ${footer()}
+        </main>
+      </div>`;
+  }
 
   drawSync();
-  icons();
+  if (viewMode === "tiles") icons();
+
+  $("#toggle-view")?.addEventListener("click", async () => {
+    viewMode = viewMode === "tiles" ? "minimal" : "tiles";
+    try { localStorage.setItem("fh-view", viewMode); } catch { /* sandbox: no storage */ }
+    await storePut("view-mode", viewMode);
+    drawHome();
+  });
+
+  $("#lh-add-btn")?.addEventListener("click", () => {
+    $<HTMLElement>("#add")?.scrollIntoView({ behavior: "smooth" });
+    $<HTMLInputElement>("#add input[name=link]")?.focus();
+  });
+
+  if (viewMode === "minimal") {
+    app.querySelectorAll<HTMLAnchorElement>(".lh-nav a").forEach((a) => {
+      a.onclick = (ev) => {
+        ev.preventDefault();
+        const grp = a.dataset.group;
+        const sec = app.querySelector<HTMLElement>(`.lh-section[data-group="${grp}"]`);
+        if (sec) sec.scrollIntoView({ behavior: "smooth", block: "start" });
+      };
+    });
+
+    const sections = app.querySelectorAll<HTMLElement>(".lh-section");
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) {
+          const grp = (entry.target as HTMLElement).dataset.group;
+          app.querySelectorAll(".lh-nav a").forEach((el) => {
+            el.classList.toggle("active", el.getAttribute("data-group") === grp);
+          });
+          break;
+        }
+      }
+    }, { rootMargin: "0px 0px -75% 0px" });
+    sections.forEach((s) => observer.observe(s));
+  }
+
   $<HTMLFormElement>("#add").onsubmit = async (ev) => {
     ev.preventDefault();
     const f = new FormData(ev.target as HTMLFormElement), raw = String(f.get("link")).trim(), err = $("#err");
@@ -237,32 +338,47 @@ function drawHome() {
   if (q) {
     const filter = () => {
       const words = q.value.toLowerCase().split(/\s+/).filter(Boolean);
-      app.querySelectorAll<HTMLElement>(".group .tile").forEach((t) => (t.hidden = !words.every((w) => t.dataset.find!.includes(w))));
-      app.querySelectorAll<HTMLElement>(".group").forEach((g) => (g.hidden = !g.querySelector(".tile:not([hidden])")));
+      if (viewMode === "tiles") {
+        app.querySelectorAll<HTMLElement>(".group .tile").forEach((t) => (t.hidden = !words.every((w) => t.dataset.find!.includes(w))));
+        app.querySelectorAll<HTMLElement>(".group").forEach((g) => (g.hidden = !g.querySelector(".tile:not([hidden])")));
+      } else {
+        app.querySelectorAll<HTMLElement>(".lh-item").forEach((t) => (t.hidden = !words.every((w) => t.dataset.find!.includes(w))));
+        app.querySelectorAll<HTMLElement>(".lh-section").forEach((g) => {
+          const has = !words.length || !!g.querySelector(".lh-item:not([hidden])");
+          g.hidden = !has;
+          const navLink = app.querySelector<HTMLElement>(`.lh-nav [data-group="${g.dataset.group}"]`);
+          if (navLink) navLink.hidden = !has;
+        });
+      }
     };
     q.oninput = filter;
     q.onkeydown = (ev) => {
-      if (ev.key === "Enter") app.querySelector<HTMLAnchorElement>(".group .tile:not([hidden]) a.face")?.click();
+      if (ev.key === "Enter") {
+        const target = app.querySelector<HTMLAnchorElement>(viewMode === "tiles" ? ".group .tile:not([hidden]) a.face" : ".lh-item:not([hidden]) a.lh-link");
+        target?.click();
+      }
       if (ev.key === "Escape") { q.value = ""; filter(); }
     };
   }
 
   // drag a tile onto another to put it there, in that tile's group (the arrow buttons do the same from the keyboard)
-  app.querySelectorAll<HTMLElement>(".group .tile").forEach((t) => {
-    t.draggable = true;
-    t.ondragstart = (ev) => { ev.dataTransfer!.setData("text/plain", t.dataset.key!); t.classList.add("dragging"); };
-    t.ondragend = () => t.classList.remove("dragging");
-    t.ondragover = (ev) => { ev.preventDefault(); t.classList.add("over"); };
-    t.ondragleave = () => t.classList.remove("over");
-    t.ondrop = async (ev) => {
-      ev.preventDefault();
-      const from = ev.dataTransfer!.getData("text/plain");
-      if (!sites.some((s) => s.key === from)) return;
-      sites = moveSite(sites, from, t.dataset.key!);
-      drawHome();
-      await save();
-    };
-  });
+  if (viewMode === "tiles") {
+    app.querySelectorAll<HTMLElement>(".group .tile").forEach((t) => {
+      t.draggable = true;
+      t.ondragstart = (ev) => { ev.dataTransfer!.setData("text/plain", t.dataset.key!); t.classList.add("dragging"); };
+      t.ondragend = () => t.classList.remove("dragging");
+      t.ondragover = (ev) => { ev.preventDefault(); t.classList.add("over"); };
+      t.ondragleave = () => t.classList.remove("over");
+      t.ondrop = async (ev) => {
+        ev.preventDefault();
+        const from = ev.dataTransfer!.getData("text/plain");
+        if (!sites.some((s) => s.key === from)) return;
+        sites = moveSite(sites, from, t.dataset.key!);
+        drawHome();
+        await save();
+      };
+    });
+  }
 }
 
 // ---------------- someone's shared list: #/u/<identity> ----------------
@@ -465,33 +581,71 @@ async function drawApps() {
 
 // ---------------- directory admin: #/admin (not linked anywhere) ----------------
 async function drawAdmin() {
+  const me = await currentSession();
+  const isAdmin = !!(me && me.persona.toLowerCase() === DIRECTORY_ADMIN.toLowerCase());
+
   app.innerHTML = `
     <p><a href="#/apps">&larr; Directory</a></p>
     <h1>Directory admin</h1>
-    <p class="muted">Admin secret (hex) and the site keys to hide, one per line. This replaces the whole blocklist.</p>
-    <div class="sync">
-      <input id="sk" type="password" autocomplete="off" placeholder="Admin secret" aria-label="Admin secret" />
-      <textarea id="bl" rows="6" aria-label="Hidden site keys"></textarea>
-      <div class="row"><button id="go" type="button">Publish blocklist</button> <span id="msg"></span></div>
-    </div>
+    ${isAdmin
+      ? `<p class="muted">Signed in with admin Viso persona <code>${esc(personaName(me.persona))}</code>.</p>
+         <p class="muted">Site keys to hide, one per line. This replaces the whole blocklist.</p>
+         <div class="sync">
+           <textarea id="bl" rows="6" aria-label="Hidden site keys"></textarea>
+           <div class="row"><button id="go" type="button">Publish blocklist</button> <span id="msg"></span></div>
+         </div>`
+      : `<p class="err">You are not signed in as the directory administrator.</p>
+         <p class="muted">This directory is administered by Viso persona <code>${esc(personaName(DIRECTORY_ADMIN))}</code>.</p>
+         ${me
+           ? `<p class="muted">Currently signed in as: <code>${esc(personaName(me.persona))}</code></p>`
+           : `<p class="muted"><a href="#/">Sign in with Viso</a> on your home page first.</p>`}
+         <details>
+           <summary>Or use admin secret (hex)</summary>
+           <div class="sync">
+             <input id="sk" type="password" autocomplete="off" placeholder="Admin secret" aria-label="Admin secret" />
+             <textarea id="bl" rows="6" aria-label="Hidden site keys"></textarea>
+             <div class="row"><button id="go" type="button">Publish blocklist</button> <span id="msg"></span></div>
+           </div>
+         </details>`
+    }
     <h2>Listed sites</h2><div id="listed" class="muted">Loading…</div>`;
   const bl = $<HTMLTextAreaElement>("#bl");
-  $("#go").onclick = async () => {
-    const list = bl.value.split("\n").map((l) => l.trim()).filter(Boolean);
+  const go = $<HTMLButtonElement>("#go");
+  if (go) go.onclick = async () => {
+    const list = bl ? bl.value.split("\n").map((l) => l.trim()).filter(Boolean) : [];
     $("#msg").textContent = "Sending…";
-    try { await blockSites($<HTMLInputElement>("#sk").value.trim(), list); $("#msg").textContent = `Done: ${list.length} hidden.`; }
-    catch (e) { $("#msg").textContent = `Error: ${errText(e)}`; }
+    try {
+      const auth = isAdmin ? me! : $<HTMLInputElement>("#sk")?.value.trim();
+      if (!auth) throw new Error("Not authorized or missing secret.");
+      await blockSites(auth, list);
+      $("#msg").textContent = `Done: ${list.length} hidden.`;
+    } catch (e) { $("#msg").textContent = `Error: ${errText(e)}`; }
   };
   try {
     const d = await loadDirectory();
-    bl.value = d.blocked.list.join("\n");
+    if (bl) bl.value = d.blocked.list.join("\n");
     const list = rows(d);
-    $("#listed").innerHTML = list.length ? `<ul>${list.map((r) =>
-      `<li>${esc(r.name)} <small class="muted"><code>${esc(r.site)}</code></small> <button class="link" type="button" data-hide="${esc(r.site)}">Hide</button></li>`).join("")}</ul>` : "Nothing listed.";
+    $("#listed").className = "";
+    $("#listed").innerHTML = list.length ? `<ul class="apps">${list.map((r) => {
+      const isHidden = d.blocked.list.includes(r.site);
+      return `
+        <li style="--h:${hue(r.site)}">
+          <a href="${esc(urlOf({ key: r.site, hash: "" }))}" target="_blank" rel="noopener noreferrer"><b>${esc(r.name)}</b></a>
+          ${r.desc ? `<span class="muted">${esc(r.desc)}</span>` : ""}
+          <small class="muted"><code>${esc(r.site)}</code></small>
+          <div class="app-acts">
+            <button class="ghost danger" type="button" data-hide="${esc(r.site)}" ${isHidden ? "disabled" : ""}>${isHidden ? "Hidden" : "Hide"}</button>
+          </div>
+        </li>`;
+    }).join("")}</ul>` : `<p class="muted">Nothing listed.</p>`;
     // adds the key to the blocklist above; nothing is sent until "Publish blocklist"
     app.querySelectorAll<HTMLButtonElement>("[data-hide]").forEach((b) => (b.onclick = () => {
-      if (!bl.value.split("\n").includes(b.dataset.hide!)) bl.value = [bl.value.trim(), b.dataset.hide].filter(Boolean).join("\n");
+      const targetBl = $<HTMLTextAreaElement>("#bl");
+      if (targetBl && !targetBl.value.split("\n").includes(b.dataset.hide!)) {
+        targetBl.value = [targetBl.value.trim(), b.dataset.hide].filter(Boolean).join("\n");
+      }
       b.disabled = true;
+      b.textContent = "Hidden";
     }));
   } catch (e) { $("#msg").textContent = `Could not load the directory: ${errText(e)}`; }
 }
@@ -513,7 +667,7 @@ document.addEventListener("click", async (ev) => {
   const b = (ev.target as HTMLElement).closest<HTMLElement>("[data-edit],[data-del],[data-left],[data-right]");
   if (!b) return;
   const d = b.dataset, moved = d.left ?? d.right, i = sites.findIndex((s) => s.key === moved);
-  if (d.edit) { editing = d.edit; drawHome(); $<HTMLInputElement>("input[name=name]").focus(); return; }
+  if (d.edit) { editing = d.edit; drawHome(); $<HTMLElement>("#add")?.scrollIntoView({ behavior: "smooth" }); $<HTMLInputElement>("input[name=name]").focus(); return; }
   if (d.del) sites = sites.filter((s) => s.key !== d.del);
   else if (d.left && i > 0) sites = moveSite(sites, d.left, sites[i - 1].key);
   else if (d.right && i >= 0 && i < sites.length - 1) sites = moveSite(sites, sites[i + 1].key, d.right);
@@ -547,6 +701,8 @@ if (query.has("viso") || query.has("whoiam")) { // back from Viso with its proof
   history.replaceState(null, "", location.pathname); // drop the one-time query
 }
 sites = parseSites(await storeGet("sites"));
+const savedView = await storeGet("view-mode");
+if (savedView === "tiles" || savedView === "minimal") viewMode = savedView;
 where = { node: "Saved on your Freenet node", browser: "Saved in this browser", session: "Not saved: lost on reload" }[await persistence()];
 me = await currentSession().catch(() => null); // before the first draw: the directory's form depends on it
 key = me ? await localIdentityKey() : null;
