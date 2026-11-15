@@ -5,7 +5,7 @@ import * as ed from "@noble/ed25519";
 import wasmUrl from "./contract.wasm?url";
 import { contract, getJson, putJson, storeGet, storePut, updateJson } from "./store";
 import { connectMessage, verifyProof } from "./whoiam";
-export { fromBase58, personaName } from "./whoiam";
+export { fromBase58, parsePersonaHex, personaName } from "./whoiam";
 
 const { bytesToHex: hex, hexToBytes: unhex } = ed.etc;
 const enc = new TextEncoder();

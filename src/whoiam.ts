@@ -33,6 +33,14 @@ export function fromBase58(s: string): Uint8Array | null {
   return new Uint8Array(out.reverse());
 }
 
+/** Parse a Viso persona (64-char hex or Base58-encoded 32-byte pubkey) into lowercase hex, or null if invalid. */
+export function parsePersonaHex(input: string): string | null {
+  const s = input.trim();
+  if (/^[0-9a-fA-F]{64}$/.test(s)) return s.toLowerCase();
+  const raw = fromBase58(s);
+  return raw && raw.length === 32 ? ed.etc.bytesToHex(raw) : null;
+}
+
 /** What whoiam signs: "whoiam-connect-v1" || pk || u32le len || base || u32le len || challenge || u64le ts. */
 export function connectMessage(pk: Uint8Array, base: string, challenge: string, ts: number): Uint8Array {
   const parts = [enc.encode("whoiam-connect-v1"), pk];

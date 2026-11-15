@@ -2,12 +2,14 @@ import "./style.css";
 import { nodeBase, persistence, storeGet, storePut } from "./store";
 import { hue, moveSite, parseLink, parseSites, type Site } from "./sites";
 import {
-  createLocalIdentity, currentSession, finishSignIn, fromBase58, linkBase, localIdentityKey, officialViso, personaName, pull, push,
-  signOut, startSignIn, type Session,
+  createLocalIdentity, currentSession, finishSignIn, fromBase58, linkBase, localIdentityKey, officialViso,
+  parsePersonaHex, personaName, pull, push, signOut, startSignIn, type Session,
 } from "./sync";
 import { parseName } from "./names";
-import { blockSites, DIRECTORY_ADMIN, listSite, loadDirectory, removeSite, resolveName, updateSite } from "./net";
-import { dirDescriptions, resolveDesc, rows, type DirDescs } from "./directory";
+import {
+  blockSites, DIRECTORY_ADMIN, listSite, loadDirectory, loadLegacyDirectory, migrateLegacyDirectory, removeSite, resolveName, setAdmins, updateSite,
+} from "./net";
+import { dirDescriptions, isDirAdmin, legacyMigrationPlan, resolveDesc, rows, type DirDescs, type DirState } from "./directory";
 import { startMusic, stopMusic } from "./music";
 
 const app = document.getElementById("home")!;
@@ -19,6 +21,8 @@ const errText = (e: unknown) => String((e as Error).message ?? e);
 let sites: Site[] = [];
 let editing: string | null = null; // key of the site in the form, null = adding
 let editingApp: { site: string; name: string; desc: string } | null = null; // app in directory form, null = adding
+let lastDirState: DirState | null = null;
+let autoMigrated = false;
 let where = "";
 let me: Session | null | undefined; // undefined = still checking
 let key: string | null = null; // secret of an identity made here, for backup
@@ -439,27 +443,45 @@ async function drawShared(id: string) {
 }
 
 // ---------------- app directory: #/apps ----------------
-async function drawApps() {
-  app.innerHTML = `
-    <p><a href="#/">&larr; Your sites</a></p>
-    <header><p class="kicker">Directory</p><h1>Freenet apps</h1>
-      <p class="lede">Sites people listed. Add the ones you want to your list. <span class="muted">The first visit on a node can take up to 30 s.</span></p></header>
-    <input id="q" class="search" type="search" placeholder="Search the directory (Ctrl+K)" aria-label="Search the directory" autocomplete="off" />
-    <div id="list" class="muted">Loading…</div>
+function radicaLinkHtml(dirState: DirState | null): string {
+  const fromDir = dirState ? rows(dirState).find((r) => r.name.trim().toLowerCase() === "radica")?.site : undefined;
+  const fromSites = sites.find((s) => s.name.trim().toLowerCase() === "radica")?.key;
+  const key = fromDir ?? fromSites;
+  return key
+    ? `<a href="${esc(urlOf({ key, hash: "" }))}" target="_blank" rel="noopener noreferrer"><b>Radica</b></a>`
+    : `<b>Radica</b>`;
+}
+
+function renderDirActions(dirState: DirState | null) {
+  const box = app.querySelector<HTMLElement>("#dir-actions");
+  if (!box) return;
+  const canAdmin = !!(me && isDirAdmin(me.persona, DIRECTORY_ADMIN, dirState));
+  const isRoot = !!(me && me.persona.toLowerCase() === DIRECTORY_ADMIN.toLowerCase());
+
+  if (!canAdmin) {
+    box.innerHTML = `
+      <h2>Propose a site</h2>
+      <div class="sync">
+        <p>Directory listings are curated by admins.</p>
+        <p class="muted">To propose a site, post its link and a short description in <code>r/FH</code> on ${radicaLinkHtml(dirState)}. Posted links will be reviewed by the admins.</p>
+      </div>`;
+    return;
+  }
+
+  box.innerHTML = `
     <h2>${editingApp ? `Edit “${esc(editingApp.name)}”` : "List a site"}</h2>
     <form id="list-form" class="sync">
-      ${me ? `<p class="muted">${editingApp
+      <p class="muted">${editingApp
         ? "Update this app’s name, description, or link. If you change the link, the new site is registered and the old one is removed from the directory."
-        : "Listed under your identity, with a few seconds of proof of work against spam. Public: you can edit or remove your listing anytime."}</p>
-        <div class="row wrap"><input name="link" required placeholder="Link, key or FreeNames name" aria-label="Link, contract key or FreeNames name" value="${editingApp ? esc(urlOf({ key: editingApp.site, hash: "" })) : ""}" /><input name="name" required maxlength="60" placeholder="Name" aria-label="Name" value="${editingApp ? esc(editingApp.name) : ""}" /></div>
-        <div class="row wrap"><input name="desc" maxlength="200" placeholder="What it is, in a line" aria-label="Description" value="${editingApp ? esc(editingApp.desc) : ""}" /><button type="submit">${editingApp ? "Save changes" : "List it"}</button>
-          ${editingApp ? `<button type="button" id="cancel-edit" class="ghost">Cancel</button><button type="button" id="delete-app" class="ghost danger">Delete listing</button>` : ""}</div>
-        <p class="err" id="lmsg" role="alert"></p>`
-      : `<p class="muted">Sign in on <a href="#/">your home page</a> to list or edit a site.</p>`}
-    </form>
-    ${footer()}`;
+        : `Admin mode · Proposals are collected in <code>r/FH</code> on ${radicaLinkHtml(dirState)}.${isRoot ? ` <a href="#/admin">Manage admins &amp; blocklist</a>` : ""}`}</p>
+      <div class="row wrap"><input name="link" required placeholder="Link, key or FreeNames name" aria-label="Link, contract key or FreeNames name" value="${editingApp ? esc(urlOf({ key: editingApp.site, hash: "" })) : ""}" /><input name="name" required maxlength="60" placeholder="Name" aria-label="Name" value="${editingApp ? esc(editingApp.name) : ""}" /></div>
+      <div class="row wrap"><input name="desc" maxlength="200" placeholder="What it is, in a line" aria-label="Description" value="${editingApp ? esc(editingApp.desc) : ""}" /><button type="submit">${editingApp ? "Save changes" : "List it"}</button>
+        ${editingApp ? `<button type="button" id="cancel-edit" class="ghost">Cancel</button><button type="button" id="delete-app" class="ghost danger">Delete listing</button>` : ""}</div>
+      <p class="err" id="lmsg" role="alert"></p>
+    </form>`;
+
   const form = $<HTMLFormElement>("#list-form");
-  if (me) form.onsubmit = async (ev) => {
+  form.onsubmit = async (ev) => {
     ev.preventDefault();
     const f = new FormData(form), raw = String(f.get("link")).trim(), msg = $("#lmsg");
     try {
@@ -474,7 +496,7 @@ async function drawApps() {
       if (!name) throw new Error("A name is needed.");
 
       if (editingApp) {
-        msg.textContent = "Working (proof of work, updating directory)…";
+        msg.textContent = "Working (updating directory)…";
         if (editingApp.site === site) {
           await listSite(me!, site, name, desc);
         } else {
@@ -487,7 +509,7 @@ async function drawApps() {
         editingApp = null;
         msg.textContent = "Updated.";
       } else {
-        msg.textContent = "Working (proof of work, a few seconds)…";
+        msg.textContent = "Working (updating directory)…";
         await listSite(me!, site, name, desc);
         msg.textContent = "Listed. It shows up here once the directory updates.";
       }
@@ -496,17 +518,17 @@ async function drawApps() {
     } catch (e) { msg.textContent = errText(e); }
   };
 
-  const cancel = app.querySelector<HTMLButtonElement>("#cancel-edit");
+  const cancel = box.querySelector<HTMLButtonElement>("#cancel-edit");
   if (cancel) cancel.onclick = () => { editingApp = null; drawApps(); };
 
-  const delBtn = app.querySelector<HTMLButtonElement>("#delete-app");
+  const delBtn = box.querySelector<HTMLButtonElement>("#delete-app");
   if (delBtn && editingApp) {
     const toDel = editingApp.site, toDelName = editingApp.name;
     delBtn.onclick = async () => {
       if (!confirm(`Remove “${toDelName}” from the public directory?`)) return;
       const msg = $("#lmsg");
       try {
-        if (msg) msg.textContent = "Removing from directory (proof of work)…";
+        if (msg) msg.textContent = "Removing from directory…";
         await removeSite(me!, toDel);
         editingApp = null;
         await drawApps();
@@ -515,36 +537,59 @@ async function drawApps() {
       }
     };
   }
+}
+
+async function drawApps() {
+  app.innerHTML = `
+    <p><a href="#/">&larr; Your sites</a></p>
+    <header><p class="kicker">Directory</p><h1>Freenet apps</h1>
+      <p class="lede">Curated Freenet sites. Add the ones you want to your list. <span class="muted">The first visit on a node can take up to 30 s.</span></p></header>
+    <input id="q" class="search" type="search" placeholder="Search the directory (Ctrl+K)" aria-label="Search the directory" autocomplete="off" />
+    <div id="list" class="muted">Loading…</div>
+    <div id="dir-actions"></div>
+    ${footer()}`;
+  renderDirActions(lastDirState);
 
   try {
-    const dirState = await loadDirectory();
+    let dirState = await loadDirectory();
+    if (location.hash !== "#/apps") return; // the user moved on while it loaded
+    let canAdmin = !!(me && isDirAdmin(me.persona, DIRECTORY_ADMIN, dirState));
+    if (canAdmin && !autoMigrated && Object.keys(dirState.entries).length === 0) {
+      autoMigrated = true;
+      $("#list").textContent = "Checking previous directory for sites to migrate…";
+      const migrated = await migrateLegacyDirectory(me!, dirState).catch(() => 0);
+      if (migrated > 0) dirState = await loadDirectory();
+      if (location.hash !== "#/apps") return;
+      canAdmin = !!(me && isDirAdmin(me.persona, DIRECTORY_ADMIN, dirState));
+    }
+    lastDirState = dirState;
     dirDescs = dirDescriptions(dirState);
     try { localStorage.setItem("fh-dir-cache", JSON.stringify(dirDescs)); } catch { /* sandbox */ }
     storePut("dir-cache", JSON.stringify(dirDescs)).catch(() => {});
     const list = rows(dirState);
-    if (location.hash !== "#/apps") return; // the user moved on while it loaded
     const has = (k: string) => sites.some((s) => s.key === k);
     $("#list").className = "";
     $("#list").innerHTML = list.length ? `<ul class="apps">${list.map((r) => {
-      const isOwner = !!(me && (r.by === me.persona || dirState.entries[r.site]?.[me.persona]));
       const onList = has(r.site);
       const oldTile = !onList ? sites.find((s) => s.name.toLowerCase() === r.name.toLowerCase()) : null;
       return `
         <li data-find="${esc(`${r.name} ${r.desc} ${r.site}`.toLowerCase())}" style="--h:${hue(r.site)}">
           <a href="${esc(urlOf({ key: r.site, hash: "" }))}" target="_blank" rel="noopener noreferrer"><b>${esc(r.name)}</b></a>
           <span class="muted">${esc(r.desc)}</span>
-          <small class="muted">${r.count > 1 ? `listed by ${r.count}` : `by ${esc(personaName(r.by).slice(0, 8))}…`}</small>
+          <small class="muted">by ${esc(personaName(r.by).slice(0, 8))}…</small>
           <div class="app-acts">
             ${onList ? `<button disabled type="button">On your list</button>`
               : oldTile ? `<button data-update-tile="${r.site}" data-old="${oldTile.key}" data-name="${esc(r.name)}" type="button" class="cta" title="Update URL on your home page">Update on list</button>`
               : `<button data-add="${r.site}" data-name="${esc(r.name)}" data-desc="${esc(r.desc)}" type="button">+ Add</button>`}
-            ${isOwner ? `
+            ${canAdmin ? `
               <button data-edit-app="${r.site}" data-name="${esc(r.name)}" data-desc="${esc(r.desc)}" type="button" class="ghost" title="Edit this listing">Edit</button>
               <button data-del-app="${r.site}" data-name="${esc(r.name)}" type="button" class="ghost danger" title="Remove from directory">&times;</button>
             ` : ""}
           </div>
         </li>`;
-    }).join("")}</ul>` : `<p class="muted">No apps listed yet. Be the first, below.</p>`;
+    }).join("")}</ul>` : `<p class="muted">No apps listed yet.</p>`;
+
+    renderDirActions(dirState);
 
     app.querySelectorAll<HTMLButtonElement>("[data-add]").forEach((b) => (b.onclick = async () => {
       await addSites([{ name: b.dataset.name!, key: b.dataset.add!, hash: "", group: "", desc: b.dataset.desc ?? "" }]);
@@ -571,7 +616,7 @@ async function drawApps() {
       if (!confirm(`Remove “${name}” from the public directory?`)) return;
       try {
         const msg = $("#lmsg");
-        if (msg) msg.textContent = "Removing from directory (proof of work)…";
+        if (msg) msg.textContent = "Removing from directory…";
         await removeSite(me!, site);
         if (editingApp?.site === site) editingApp = null;
         await drawApps();
@@ -602,45 +647,110 @@ async function drawAdmin() {
   app.innerHTML = `
     <p><a href="#/apps">&larr; Directory</a></p>
     <h1>Directory admin</h1>
+    <div id="admin-role"></div>
     ${isAdmin
-      ? `<p class="muted">Signed in with admin Viso persona <code>${esc(personaName(me.persona))}</code>.</p>
+      ? `<p class="muted">Signed in with root admin Viso persona <code>${esc(personaName(me.persona))}</code>.</p>
+         <h2>Delegated admins</h2>
+         <p class="muted">Viso personas (Base58 or 64-char hex), one per line. Delegated admins can add, edit, and remove directory sites on <a href="#/apps">#/apps</a>.</p>
+         <div class="sync">
+           <textarea id="admins-list" rows="4" aria-label="Delegated admin personas"></textarea>
+           <div class="row"><button id="save-admins" type="button">Publish admins</button> <span id="amsg"></span></div>
+         </div>
+         <h2>Blocklist</h2>
          <p class="muted">Site keys to hide, one per line. This replaces the whole blocklist.</p>
          <div class="sync">
            <textarea id="bl" rows="6" aria-label="Hidden site keys"></textarea>
            <div class="row"><button id="go" type="button">Publish blocklist</button> <span id="msg"></span></div>
          </div>`
-      : `<p class="err">You are not signed in as the directory administrator.</p>
-         <p class="muted">This directory is administered by Viso persona <code>${esc(personaName(DIRECTORY_ADMIN))}</code>.</p>
+      : `<p class="err">You are not signed in as the root directory administrator.</p>
+         <p class="muted">Root admin Viso persona: <code>${esc(personaName(DIRECTORY_ADMIN))}</code>.</p>
          ${me
            ? `<p class="muted">Currently signed in as: <code>${esc(personaName(me.persona))}</code></p>`
            : `<p class="muted"><a href="#/">Sign in with Viso</a> on your home page first.</p>`}
          <details>
-           <summary>Or use admin secret (hex)</summary>
+           <summary>Or use root admin secret (hex)</summary>
            <div class="sync">
-             <input id="sk" type="password" autocomplete="off" placeholder="Admin secret" aria-label="Admin secret" />
-             <textarea id="bl" rows="6" aria-label="Hidden site keys"></textarea>
+             <input id="sk" type="password" autocomplete="off" placeholder="Root admin secret" aria-label="Root admin secret" />
+             <textarea id="admins-list" rows="4" placeholder="Delegated admin personas (one per line)" aria-label="Delegated admin personas"></textarea>
+             <div class="row"><button id="save-admins" type="button">Publish admins</button> <span id="amsg"></span></div>
+             <textarea id="bl" rows="6" placeholder="Hidden site keys (one per line)" aria-label="Hidden site keys"></textarea>
              <div class="row"><button id="go" type="button">Publish blocklist</button> <span id="msg"></span></div>
            </div>
          </details>`
     }
+    <div id="migrate-box"></div>
     <h2>Listed sites</h2><div id="listed" class="muted">Loading…</div>`;
+  const adminsEl = $<HTMLTextAreaElement>("#admins-list");
+  const saveAdmins = $<HTMLButtonElement>("#save-admins");
   const bl = $<HTMLTextAreaElement>("#bl");
   const go = $<HTMLButtonElement>("#go");
+  const getAuth = () => {
+    const auth = isAdmin ? me! : $<HTMLInputElement>("#sk")?.value.trim();
+    if (!auth) throw new Error("Not authorized or missing secret.");
+    return auth;
+  };
+  if (saveAdmins) saveAdmins.onclick = async () => {
+    $("#amsg").textContent = "Sending…";
+    try {
+      const auth = getAuth();
+      const seen = new Set<string>();
+      const list: string[] = [];
+      for (const rawLine of (adminsEl?.value ?? "").split("\n")) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        const hex = parsePersonaHex(line);
+        if (!hex) throw new Error(`Invalid persona: ${line}`);
+        if (hex === DIRECTORY_ADMIN.toLowerCase() || seen.has(hex)) continue;
+        seen.add(hex);
+        list.push(hex);
+      }
+      await setAdmins(auth, list);
+      $("#amsg").textContent = `Done: ${list.length} delegated admin(s).`;
+    } catch (e) { $("#amsg").textContent = `Error: ${errText(e)}`; }
+  };
   if (go) go.onclick = async () => {
     const list = bl ? bl.value.split("\n").map((l) => l.trim()).filter(Boolean) : [];
     $("#msg").textContent = "Sending…";
     try {
-      const auth = isAdmin ? me! : $<HTMLInputElement>("#sk")?.value.trim();
-      if (!auth) throw new Error("Not authorized or missing secret.");
-      await blockSites(auth, list);
+      await blockSites(getAuth(), list);
       $("#msg").textContent = `Done: ${list.length} hidden.`;
     } catch (e) { $("#msg").textContent = `Error: ${errText(e)}`; }
   };
   try {
     const d = await loadDirectory();
+    lastDirState = d;
     dirDescs = dirDescriptions(d);
     try { localStorage.setItem("fh-dir-cache", JSON.stringify(dirDescs)); } catch { /* sandbox */ }
     storePut("dir-cache", JSON.stringify(dirDescs)).catch(() => {});
+    if (!isAdmin && me && isDirAdmin(me.persona, DIRECTORY_ADMIN, d)) {
+      $("#admin-role").innerHTML = `<p class="sync">You are signed in as a <b>delegated directory admin</b>. You can add, edit, and remove sites directly on <a href="#/apps">#/apps</a>. Only the root admin can manage the admin list and blocklist.</p>`;
+    }
+    if (me && isDirAdmin(me.persona, DIRECTORY_ADMIN, d)) {
+      loadLegacyDirectory().then((legacy) => {
+        if (location.hash !== "#/admin") return;
+        const plan = legacyMigrationPlan(d, legacy, isAdmin);
+        const mbox = app.querySelector<HTMLElement>("#migrate-box");
+        if (!mbox || (!plan.entries.length && !plan.blocked.length)) return;
+        mbox.innerHTML = `
+          <h2>Legacy migration</h2>
+          <div class="sync">
+            <p class="muted">Found ${plan.entries.length} site(s)${plan.blocked.length ? ` and ${plan.blocked.length} blocklist key(s)` : ""} in the previous directory that are not in the new directory yet.</p>
+            <div class="row"><button id="run-migrate" type="button">Migrate now</button> <span id="mig-msg"></span></div>
+          </div>`;
+        app.querySelector<HTMLButtonElement>("#run-migrate")!.onclick = async () => {
+          const mmsg = app.querySelector<HTMLElement>("#mig-msg")!;
+          mmsg.textContent = "Migrating…";
+          try {
+            const count = await migrateLegacyDirectory(me, d, legacy);
+            mmsg.textContent = `Migrated ${count} site(s).`;
+            await drawAdmin();
+          } catch (err) {
+            mmsg.textContent = `Error: ${errText(err)}`;
+          }
+        };
+      }).catch(() => {});
+    }
+    if (adminsEl) adminsEl.value = (d.admins?.list ?? []).map(personaName).join("\n");
     if (bl) bl.value = d.blocked.list.join("\n");
     const list = rows(d);
     $("#listed").className = "";

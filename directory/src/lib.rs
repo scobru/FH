@@ -1,27 +1,28 @@
-//! Public directory of Freenet apps. One shared instance; parameters = admin ed25519 pubkey (32 bytes) || app path
-//! (`/v1/contract/web/<FH id>/`). Anyone signed in to FH (a whoiam persona, through an app key delegated for that
-//! app path, see `whoiam-delegation`) lists a site with a name and a short description, plus a proof-of-work nonce.
-//! Entries are kept per (site, persona), newest wins, so every merge order converges; the UI shows each site once.
-//! The admin hides sites with a signed blocklist. The newest MAX_ENTRIES entries are kept. State is JSON.
+//! Public directory of Freenet apps. One shared instance; parameters = root admin ed25519 pubkey (32 bytes) || app path
+//! (`/v1/contract/web/<FH id>/`). Only the root admin or delegated admins (listed in `admins`, signed by the root admin)
+//! may add, edit, or delete entries. Each entry is kept per site key, newest wins, so every merge order converges.
+//! The root admin hides sites with a signed blocklist. The newest MAX_ENTRIES entries are kept. State is JSON.
 use freenet_stdlib::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use whoiam_delegation::{check, key, verify, Cert, R};
 
-pub const POW_BITS: u32 = 18;
+pub const POW_BITS: u32 = 12;
 pub const MAX_ENTRIES: usize = 1000;
 const MAX_NAME: usize = 60;
 const MAX_DESC: usize = 200;
+const MAX_ADMINS: usize = 256;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Entry {
+    pub by: String, // lowercase 64-char hex pubkey of the admin persona
     pub name: String,
     pub desc: String,
     pub ts: u64,
     pub nonce: u64,
-    pub sig: String, // hex, by the persona's delegated app key over `fhd1|<site>|<persona>|<name>|<desc>|<ts>`
-    pub cert: Cert,  // the persona's delegation to that key
+    pub sig: String, // hex, by `by`'s delegated app key over `fhd1|<site>|<by>|<name>|<desc>|<ts>`
+    pub cert: Cert,  // `by`'s delegation to that key
     #[serde(default)]
     pub deleted: bool,
 }
@@ -30,24 +31,37 @@ pub struct Entry {
 pub struct Blocklist {
     pub ts: u64,
     pub list: Vec<String>, // site keys
-    pub sig: String,       // hex, by admin over `fhb1|<ts>|<list joined by ,>`
+    pub sig: String,       // hex, by root admin over `fhb1|<ts>|<list joined by ,>`
     #[serde(default)]
-    pub cert: Option<Cert>, // delegation from the admin persona for this app path
+    pub cert: Option<Cert>, // delegation from the root admin persona for this app path
 }
 
-/// Also the delta: an update carries the entries and blocklist to merge.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct Admins {
+    pub ts: u64,
+    pub list: Vec<String>, // lowercase 64-char hex pubkeys of delegated admins
+    pub sig: String,       // hex, by root admin over `fha1|<ts>|<list joined by ,>`
+    #[serde(default)]
+    pub cert: Option<Cert>, // delegation from the root admin persona for this app path
+}
+
+/// Also the delta: an update carries the entries, blocklist, and admins list to merge.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct DirState {
     #[serde(default)]
-    pub entries: BTreeMap<String, BTreeMap<String, Entry>>, // site key (base58) -> persona (hex) -> entry
+    pub entries: BTreeMap<String, Entry>, // site key (base58) -> latest entry
     #[serde(default)]
     pub blocked: Blocklist,
+    #[serde(default)]
+    pub admins: Admins,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Summary {
-    pub entries: BTreeMap<String, BTreeMap<String, u64>>,
+    pub entries: BTreeMap<String, u64>,
     pub blocked_ts: u64,
+    #[serde(default)]
+    pub admins_ts: u64,
 }
 
 pub fn entry_msg(site: &str, persona: &str, e: &Entry) -> String {
@@ -73,19 +87,39 @@ fn is_site(s: &str) -> bool {
     (32..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric())
 }
 
+fn is_hex_pubkey(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn is_admin(root: &str, admins: &Admins, persona: &str) -> bool {
+    persona == root || admins.list.iter().any(|a| a == persona)
+}
+
 fn text_ok(s: &str, min: usize, max: usize) -> bool {
     (min..=max).contains(&s.chars().count()) && !s.chars().any(char::is_control) && !s.contains('|')
 }
 
-fn check_entry(app: &str, site: &str, persona: &str, e: &Entry) -> R<()> {
-    if !is_site(site) {
+fn verify_root_signed(admin: &str, app: &str, msg: &str, sig: &str, cert: &Option<Cert>) -> R<()> {
+    if let Some(cert) = cert {
+        let app_key = check(admin, app, cert)?;
+        verify(&app_key, msg.as_bytes(), sig)
+    } else {
+        verify(&key(admin)?, msg.as_bytes(), sig)
+    }
+}
+
+fn check_entry(root: &str, app: &str, admins: &Admins, site: &str, e: &Entry) -> R<()> {
+    if !is_site(site) || !is_hex_pubkey(&e.by) {
         return Err("bad entry".into());
+    }
+    if !is_admin(root, admins, &e.by) {
+        return Err("not an admin".into());
     }
     if !e.deleted && (!text_ok(&e.name, 1, MAX_NAME) || !text_ok(&e.desc, 0, MAX_DESC)) {
         return Err("bad entry".into());
     }
-    let msg = entry_msg(site, persona, e);
-    verify(&check(persona, app, &e.cert)?, msg.as_bytes(), &e.sig)?;
+    let msg = entry_msg(site, &e.by, e);
+    verify(&check(&e.by, app, &e.cert)?, msg.as_bytes(), &e.sig)?;
     if zero_bits(&Sha256::digest(format!("{msg}|{}", e.nonce).as_bytes())) < POW_BITS {
         return Err("insufficient proof of work".into());
     }
@@ -100,12 +134,18 @@ fn check_blocklist(admin: &str, app: &str, b: &Blocklist) -> R<()> {
         return Err("bad blocklist".into());
     }
     let msg = format!("fhb1|{}|{}", b.ts, b.list.join(","));
-    if let Some(cert) = &b.cert {
-        let app_key = check(admin, app, cert)?;
-        verify(&app_key, msg.as_bytes(), &b.sig)
-    } else {
-        verify(&key(admin)?, msg.as_bytes(), &b.sig)
+    verify_root_signed(admin, app, &msg, &b.sig, &b.cert)
+}
+
+fn check_admins(admin: &str, app: &str, a: &Admins) -> R<()> {
+    if *a == Admins::default() {
+        return Ok(());
     }
+    if a.list.len() > MAX_ADMINS || !a.list.iter().all(|p| is_hex_pubkey(p)) {
+        return Err("bad admins list".into());
+    }
+    let msg = format!("fha1|{}|{}", a.ts, a.list.join(","));
+    verify_root_signed(admin, app, &msg, &a.sig, &a.cert)
 }
 
 fn split(params: &str) -> R<(String, String)> {
@@ -116,70 +156,67 @@ fn split(params: &str) -> R<(String, String)> {
 
 /// Keep the newest `max` entries; deterministic, so merge order does not matter.
 fn prune(s: &mut DirState, max: usize) {
-    let mut all: Vec<_> = s.entries.iter().flat_map(|(site, m)| m.iter().map(move |(p, e)| (std::cmp::Reverse(e.ts), site.clone(), p.clone()))).collect();
-    if all.len() <= max {
+    if s.entries.len() <= max {
         return;
     }
+    let mut all: Vec<_> = s.entries.iter().map(|(site, e)| (std::cmp::Reverse(e.ts), site.clone())).collect();
     all.sort();
-    for (_, site, p) in all.into_iter().skip(max) {
-        let m = s.entries.get_mut(&site).unwrap();
-        m.remove(&p);
-        if m.is_empty() {
-            s.entries.remove(&site);
-        }
+    for (_, site) in all.into_iter().skip(max) {
+        s.entries.remove(&site);
     }
 }
 
 pub fn validate(params: &str, s: &DirState) -> R<()> {
     let (admin, app) = split(params)?;
+    check_admins(&admin, &app, &s.admins)?;
     check_blocklist(&admin, &app, &s.blocked)?;
-    if s.entries.values().map(BTreeMap::len).sum::<usize>() > MAX_ENTRIES || s.entries.keys().any(|k| s.blocked.list.contains(k)) {
+    if s.entries.len() > MAX_ENTRIES || s.entries.keys().any(|k| s.blocked.list.contains(k)) {
         return Err("state out of bounds".into());
     }
-    s.entries.iter().try_for_each(|(site, m)| m.iter().try_for_each(|(p, e)| check_entry(&app, site, p, e)))
+    s.entries.iter().try_for_each(|(site, e)| check_entry(&admin, &app, &s.admins, site, e))
 }
 
 /// Merge `d` into `s`. Invalid parts of `d` are an error, so a bad update is refused as a whole.
 pub fn apply(params: &str, s: &mut DirState, d: DirState) -> R<()> {
     let (admin, app) = split(params)?;
-    if d.blocked.ts > s.blocked.ts {
+    if (d.admins.ts, &d.admins.sig) > (s.admins.ts, &s.admins.sig) {
+        check_admins(&admin, &app, &d.admins)?;
+        s.admins = d.admins;
+    }
+    if (d.blocked.ts, &d.blocked.sig) > (s.blocked.ts, &s.blocked.sig) {
         check_blocklist(&admin, &app, &d.blocked)?;
         s.blocked = d.blocked;
     }
-    for (site, m) in d.entries {
-        for (p, e) in m {
-            check_entry(&app, &site, &p, &e)?;
-            let cur = s.entries.entry(site.clone()).or_default();
-            if cur.get(&p).is_none_or(|old| (e.ts, &e.sig) > (old.ts, &old.sig)) {
-                if e.deleted {
-                    cur.remove(&p);
-                } else {
-                    cur.insert(p, e);
-                }
-            }
+    for (site, e) in d.entries {
+        check_entry(&admin, &app, &s.admins, &site, &e)?;
+        if s.entries.get(&site).is_none_or(|old| (e.ts, &e.sig) > (old.ts, &old.sig)) {
+            s.entries.insert(site, e);
         }
     }
     let blocked = s.blocked.list.clone();
-    s.entries.retain(|site, m| !m.is_empty() && !blocked.contains(site));
+    let admins = s.admins.clone();
+    s.entries.retain(|site, e| !blocked.contains(site) && is_admin(&admin, &admins, &e.by));
     prune(s, MAX_ENTRIES);
     Ok(())
 }
 
 pub fn summarize(s: &DirState) -> Summary {
     Summary {
-        entries: s.entries.iter().map(|(site, m)| (site.clone(), m.iter().map(|(p, e)| (p.clone(), e.ts)).collect())).collect(),
+        entries: s.entries.iter().map(|(site, e)| (site.clone(), e.ts)).collect(),
         blocked_ts: s.blocked.ts,
+        admins_ts: s.admins.ts,
     }
 }
 
 pub fn delta(s: &DirState, known: &Summary) -> DirState {
-    let newer = |site: &str, p: &str, e: &Entry| known.entries.get(site).and_then(|m| m.get(p)).is_none_or(|ts| e.ts > *ts);
+    let newer = |site: &str, e: &Entry| known.entries.get(site).is_none_or(|ts| e.ts > *ts);
     DirState {
         entries: s.entries.iter()
-            .map(|(site, m)| (site.clone(), m.iter().filter(|(p, e)| newer(site, p, e)).map(|(p, e)| (p.clone(), e.clone())).collect::<BTreeMap<_, _>>()))
-            .filter(|(_, m)| !m.is_empty())
+            .filter(|(site, e)| newer(site, e))
+            .map(|(site, e)| (site.clone(), e.clone()))
             .collect(),
         blocked: if s.blocked.ts > known.blocked_ts { s.blocked.clone() } else { Blocklist::default() },
+        admins: if s.admins.ts > known.admins_ts { s.admins.clone() } else { Admins::default() },
     }
 }
 
@@ -256,50 +293,118 @@ mod tests {
     fn pk(k: &SigningKey) -> String { hex::encode(k.verifying_key().as_bytes()) }
     fn params() -> String { format!("{}{}", pk(&sk(99)), hex::encode(APP)) }
 
-    /// `who`'s entry for `site`, signed by an app key delegated for `app`, with its proof of work.
-    fn entry(who: &SigningKey, app: &str, site: &str, name: &str, ts: u64) -> (String, Entry) {
-        let app_key = sk(100);
-        let (base, challenge) = (format!("http://127.0.0.1:7509{app}"), format!("wd1.{}.n1", pk(&app_key)));
+    fn cert_for(who: &SigningKey, app: &str, app_key: &SigningKey) -> Cert {
+        let base = format!("http://127.0.0.1:7509{app}");
+        let challenge = format!("wd1.{}.n1", pk(app_key));
         let csig = who.sign(&connect_message(who.verifying_key().as_bytes(), &base, &challenge, 1));
-        let mut e = Entry { name: name.into(), desc: "a site".into(), ts, nonce: 0, sig: String::new(), cert: Cert { base, challenge, ts: 1, sig: hex::encode(csig.to_bytes()) }, deleted: false };
+        Cert { base, challenge, ts: 1, sig: hex::encode(csig.to_bytes()) }
+    }
+
+    /// `who`'s entry for `site`, signed by an app key delegated for `app`, with its proof of work.
+    fn entry(who: &SigningKey, app: &str, site: &str, name: &str, ts: u64, deleted: bool) -> Entry {
+        let app_key = sk(100);
+        let mut e = Entry {
+            by: pk(who),
+            name: if deleted { String::new() } else { name.into() },
+            desc: if deleted { String::new() } else { "a site".into() },
+            ts,
+            nonce: 0,
+            sig: String::new(),
+            cert: cert_for(who, app, &app_key),
+            deleted,
+        };
         let msg = entry_msg(site, &pk(who), &e);
         e.sig = hex::encode(app_key.sign(msg.as_bytes()).to_bytes());
         while zero_bits(&Sha256::digest(format!("{msg}|{}", e.nonce).as_bytes())) < POW_BITS {
             e.nonce += 1;
         }
-        (pk(who), e)
+        e
     }
-    fn delta_of(site: &str, (p, e): (String, Entry)) -> DirState {
-        DirState { entries: [(site.to_string(), [(p, e)].into())].into(), ..Default::default() }
+
+    fn delta_of(site: &str, e: Entry) -> DirState {
+        DirState { entries: [(site.to_string(), e)].into(), ..Default::default() }
+    }
+
+    fn admins_update(root: &SigningKey, ts: u64, list: Vec<String>) -> Admins {
+        let msg = format!("fha1|{ts}|{}", list.join(","));
+        Admins { ts, list, sig: hex::encode(root.sign(msg.as_bytes()).to_bytes()), cert: None }
     }
 
     #[test]
-    fn entries_merge_per_persona_and_bad_ones_are_refused() {
-        let p = params();
+    fn only_admins_can_list_edit_and_delete_entries() {
+        let p = params(); // root admin is sk(99)
         let mut s = DirState::default();
         assert!(validate(&p, &s).is_ok());
-        let (old, new, other) = (entry(&sk(1), APP, SITE, "Old", 1), entry(&sk(1), APP, SITE, "New", 2), entry(&sk(2), APP, SITE, "Other", 1));
-        for d in [new.clone(), old.clone(), other.clone()] {
-            apply(&p, &mut s, delta_of(SITE, d)).unwrap();
+
+        // Non-admin cannot add an entry
+        assert!(apply(&p, &mut s, delta_of(SITE, entry(&sk(1), APP, SITE, "Spam", 1, false))).is_err());
+
+        // Root admin can add, and delegated admin can edit/delete
+        let root = sk(99);
+        let bob = sk(2);
+        apply(&p, &mut s, DirState { admins: admins_update(&root, 1, vec![pk(&bob)]), ..Default::default() }).unwrap();
+
+        let old = entry(&root, APP, SITE, "Old", 1, false);
+        let new = entry(&bob, APP, SITE, "New", 2, false);
+        for e in [new, old] {
+            apply(&p, &mut s, delta_of(SITE, e)).unwrap();
         }
-        assert_eq!(s.entries[SITE][&pk(&sk(1))].name, "New"); // newest per persona, whatever the order
-        assert_eq!(s.entries[SITE].len(), 2);
+        assert_eq!(s.entries[SITE].name, "New"); // newest wins across admins, whatever the order
+        assert_eq!(s.entries[SITE].by, pk(&bob));
         assert!(validate(&p, &s).is_ok());
-        // delegated for another app, tampered name
-        assert!(apply(&p, &mut s, delta_of(SITE, entry(&sk(3), "/v1/contract/web/Other/", SITE, "X", 5))).is_err());
-        let (who, mut e) = entry(&sk(3), APP, SITE, "X", 5);
-        e.name = "Y".into();
-        assert!(apply(&p, &mut s, delta_of(SITE, (who, e))).is_err());
-        // a delta from a summary carries only what is newer
+
+        // Delegated for another app, or tampered name -> rejected
+        assert!(apply(&p, &mut s, delta_of(SITE, entry(&bob, "/v1/contract/web/Other/", SITE, "X", 5, false))).is_err());
+        let mut bad = entry(&bob, APP, SITE, "X", 5, false);
+        bad.name = "Y".into();
+        assert!(apply(&p, &mut s, delta_of(SITE, bad)).is_err());
+
+        // A delta from a summary carries nothing when in sync
         let known = summarize(&s);
         assert_eq!(delta(&s, &known), DirState::default());
+    }
+
+    #[test]
+    fn removing_a_delegated_admin_purges_their_entries_and_blocks_future_ones() {
+        let p = params();
+        let root = sk(99);
+        let bob = sk(2);
+        let mut s = DirState::default();
+
+        // Add bob via Viso delegation from root
+        let app_key = sk(101);
+        let list = vec![pk(&bob)];
+        let msg = format!("fha1|5|{}", list.join(","));
+        let admins = Admins {
+            ts: 5,
+            list,
+            sig: hex::encode(app_key.sign(msg.as_bytes()).to_bytes()),
+            cert: Some(cert_for(&root, APP, &app_key)),
+        };
+        apply(&p, &mut s, DirState { admins, ..Default::default() }).unwrap();
+
+        // Bob cannot modify the admins list
+        let forged_admins = admins_update(&bob, 6, vec![pk(&sk(3))]);
+        assert!(apply(&p, &mut s, DirState { admins: forged_admins, ..Default::default() }).is_err());
+
+        // Bob adds a site
+        apply(&p, &mut s, delta_of(SITE, entry(&bob, APP, SITE, "BobSite", 10, false))).unwrap();
+        assert!(s.entries.contains_key(SITE));
+
+        // Root removes Bob; Bob's entries are purged so state remains valid
+        apply(&p, &mut s, DirState { admins: admins_update(&root, 20, vec![]), ..Default::default() }).unwrap();
+        assert!(s.entries.is_empty());
+        assert!(validate(&p, &s).is_ok());
+
+        // Bob can no longer submit
+        assert!(apply(&p, &mut s, delta_of(SITE, entry(&bob, APP, SITE, "Again", 30, false))).is_err());
     }
 
     #[test]
     fn the_admin_blocklist_hides_sites() {
         let p = params();
         let mut s = DirState::default();
-        apply(&p, &mut s, delta_of(SITE, entry(&sk(1), APP, SITE, "Site", 1))).unwrap();
+        apply(&p, &mut s, delta_of(SITE, entry(&sk(99), APP, SITE, "Site", 1, false))).unwrap();
         let list = vec![SITE.to_string()];
         let sig = |k: &SigningKey| hex::encode(k.sign(format!("fhb1|5|{}", list.join(",")).as_bytes()).to_bytes());
         let forged = DirState { blocked: Blocklist { ts: 5, list: list.clone(), sig: sig(&sk(1)), cert: None }, ..Default::default() };
@@ -307,7 +412,7 @@ mod tests {
         apply(&p, &mut s, DirState { blocked: Blocklist { ts: 5, list: list.clone(), sig: sig(&sk(99)), cert: None }, ..Default::default() }).unwrap();
         assert!(s.entries.is_empty());
         // a blocked site cannot come back
-        apply(&p, &mut s, delta_of(SITE, entry(&sk(2), APP, SITE, "Again", 9))).unwrap();
+        apply(&p, &mut s, delta_of(SITE, entry(&sk(99), APP, SITE, "Again", 9, false))).unwrap();
         assert!(s.entries.is_empty());
         assert!(validate(&p, &s).is_ok());
     }
@@ -316,19 +421,14 @@ mod tests {
     fn the_admin_blocklist_works_with_viso_delegation() {
         let p = params(); // admin is sk(99)
         let mut s = DirState::default();
-        apply(&p, &mut s, delta_of(SITE, entry(&sk(1), APP, SITE, "Site", 1))).unwrap();
-        assert_eq!(s.entries[SITE].len(), 1);
+        apply(&p, &mut s, delta_of(SITE, entry(&sk(99), APP, SITE, "Site", 1, false))).unwrap();
+        assert_eq!(s.entries.len(), 1);
 
         let app_key = sk(101);
-        let base = format!("http://127.0.0.1:7509{APP}");
-        let challenge = format!("wd1.{}.n2", pk(&app_key));
-        let csig = sk(99).sign(&connect_message(sk(99).verifying_key().as_bytes(), &base, &challenge, 1));
-        let cert = Cert { base, challenge, ts: 1, sig: hex::encode(csig.to_bytes()) };
-
         let list = vec![SITE.to_string()];
         let msg = format!("fhb1|6|{}", list.join(","));
         let sig = hex::encode(app_key.sign(msg.as_bytes()).to_bytes());
-        let blocked = Blocklist { ts: 6, list, sig, cert: Some(cert) };
+        let blocked = Blocklist { ts: 6, list, sig, cert: Some(cert_for(&sk(99), APP, &app_key)) };
 
         apply(&p, &mut s, DirState { blocked, ..Default::default() }).unwrap();
         assert!(s.entries.is_empty());
@@ -336,32 +436,20 @@ mod tests {
     }
 
     #[test]
-    fn entries_can_be_deleted() {
+    fn entries_can_be_deleted_by_any_admin() {
         let p = params();
+        let root = sk(99);
+        let bob = sk(2);
         let mut s = DirState::default();
-        let (who, e1) = entry(&sk(1), APP, SITE, "Site", 1);
-        apply(&p, &mut s, delta_of(SITE, (who.clone(), e1))).unwrap();
-        assert_eq!(s.entries[SITE].len(), 1);
+        apply(&p, &mut s, DirState { admins: admins_update(&root, 1, vec![pk(&bob)]), ..Default::default() }).unwrap();
+        apply(&p, &mut s, delta_of(SITE, entry(&root, APP, SITE, "Site", 1, false))).unwrap();
+        assert!(!s.entries[SITE].deleted);
 
-        let app_key = sk(100);
-        let (base, challenge) = (format!("http://127.0.0.1:7509{APP}"), format!("wd1.{}.n1", pk(&app_key)));
-        let csig = sk(1).sign(&connect_message(sk(1).verifying_key().as_bytes(), &base, &challenge, 1));
-        let mut e_del = Entry {
-            name: String::new(),
-            desc: String::new(),
-            ts: 2,
-            nonce: 0,
-            sig: String::new(),
-            cert: Cert { base, challenge, ts: 1, sig: hex::encode(csig.to_bytes()) },
-            deleted: true,
-        };
-        let msg = entry_msg(SITE, &pk(&sk(1)), &e_del);
-        e_del.sig = hex::encode(app_key.sign(msg.as_bytes()).to_bytes());
-        while zero_bits(&Sha256::digest(format!("{msg}|{}", e_del.nonce).as_bytes())) < POW_BITS {
-            e_del.nonce += 1;
-        }
-        apply(&p, &mut s, delta_of(SITE, (who, e_del))).unwrap();
-        assert!(s.entries.get(SITE).is_none());
+        // Bob deletes the site listed by root; tombstone stays and prevents older delta resurrection
+        apply(&p, &mut s, delta_of(SITE, entry(&bob, APP, SITE, "", 2, true))).unwrap();
+        assert!(s.entries[SITE].deleted);
+        apply(&p, &mut s, delta_of(SITE, entry(&root, APP, SITE, "Site", 1, false))).unwrap();
+        assert!(s.entries[SITE].deleted);
         assert!(validate(&p, &s).is_ok());
     }
 }

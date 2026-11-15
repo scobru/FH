@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import * as ed from "@noble/ed25519";
-import { connectMessage, fromBase58, toBase58, verifyProof } from "./whoiam.ts";
+import { connectMessage, fromBase58, parsePersonaHex, toBase58, verifyProof } from "./whoiam.ts";
 
 const hex = ed.etc.bytesToHex;
 
@@ -36,4 +36,12 @@ test("base58 round trip", () => {
     assert.deepEqual(fromBase58(toBase58(b)), b);
   }
   assert.equal(fromBase58("0OIl"), null);
+});
+
+test("parsePersonaHex accepts Base58 and 64-char hex personas", () => {
+  const pkHex = "2a76f1666f3aac4f859a1f35300050b69275202d3b880d9f165083c92818b0b5";
+  assert.equal(parsePersonaHex("3rmKPdMLRKZPKpEc2UThti8k4EdxzsAH3j7eWx8GhqYY"), pkHex);
+  assert.equal(parsePersonaHex(`  ${pkHex.toUpperCase()}  `), pkHex);
+  assert.equal(parsePersonaHex("112"), null);
+  assert.equal(parsePersonaHex("not-a-persona"), null);
 });
