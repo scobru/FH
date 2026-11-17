@@ -1,6 +1,6 @@
 import "./style.css";
-import { nodeBase, persistence, storeGet, storePut } from "./store";
-import { hue, moveSite, parseLink, parseSites, type Site } from "./sites";
+import { nodeBase, persistence, stateHash, storeGet, storePut } from "./store";
+import { dropSite, hue, moveSite, parseFollows, parseLink, parseSites, shareId, type Site } from "./sites";
 import {
   createLocalIdentity, currentSession, finishSignIn, fromBase58, linkBase, localIdentityKey, officialViso,
   parsePersonaHex, personaName, pull, push, signOut, startSignIn, type Session,
@@ -27,6 +27,13 @@ let where = "";
 let me: Session | null | undefined; // undefined = still checking
 let key: string | null = null; // secret of an identity made here, for backup
 let syncMsg = "";
+let publishing = false; // the list is published (public, synced across nodes) only when the user turns this on
+let signPanel = false; // sign-in form open in the top bar
+let follows: string[] = []; // identities whose public lists the user follows
+let watching = false; // optional: compare each site's contract state with the last one seen
+let watchMsg = "";
+let watch: Record<string, { h: string; new?: string }> = {}; // per site: state hash last seen, and a newer one if it changed since
+let checking = false;
 let viewMode: "tiles" | "minimal" = "tiles";
 try {
   const saved = localStorage.getItem("fh-view");
@@ -45,7 +52,7 @@ const keepLocal = async (ts: number) => { await storePut("sites", JSON.stringify
 async function save() {
   const ts = Date.now();
   await keepLocal(ts);
-  if (me) await publish(me, ts);
+  if (me && publishing) await publish(me, ts);
 }
 
 async function publish(who: Session, ts: number) {
@@ -54,18 +61,53 @@ async function publish(who: Session, ts: number) {
   drawSync();
 }
 
-/** Newest list wins: take the published one, or publish ours. */
+/** Newest list wins: take the published one, or publish ours. An empty published list (retracted) never wipes ours. */
 async function sync() {
-  if (!me) return;
+  if (!me || !publishing) return;
   syncMsg = "Syncing…"; drawSync();
   const remote = await pull(me.persona), localTs = Number(await storeGet("sites-ts")) || 0;
-  if (remote && remote.ts > localTs) {
+  const retracted = !!remote && !parseSites(remote.list).length && sites.length > 0;
+  if (remote && remote.ts > localTs && !retracted) {
     sites = parseSites(remote.list);
     await keepLocal(remote.ts);
     syncMsg = "Synced.";
     if (!location.hash || location.hash === "#/") drawHome();
-  } else if (!remote || localTs > remote.ts) await publish(me, localTs || Date.now());
+  } else if (!remote || retracted || localTs > remote.ts) await publish(me, retracted ? Date.now() : localTs || Date.now());
   else { syncMsg = "Synced."; drawSync(); }
+}
+
+const setFollow = async (id: string, on: boolean) => {
+  follows = on ? [...new Set([...follows, id])] : follows.filter((x) => x !== id);
+  await storePut("follows", JSON.stringify(follows));
+};
+
+// ---- optional monitoring: has a site's contract state changed since the user last opened it? ----
+const saveWatch = () => storePut("watch-state", JSON.stringify(watch));
+const changedKeys = () => Object.keys(watch).filter((k) => watch[k].new).sort().join();
+
+async function checkSites() {
+  if (checking || !watching) return;
+  checking = true;
+  const before = changedKeys(), keys = sites.map((s) => s.key);
+  try {
+    for (const k of Object.keys(watch)) if (!keys.includes(k)) delete watch[k];
+    for (const [i, k] of keys.entries()) {
+      watchMsg = `Checking ${i + 1}/${keys.length}…`; drawSync();
+      const h = await stateHash(k);
+      if (!watching) return;
+      if (!h) continue; // not reachable now: keep what we know
+      const w = watch[k];
+      if (!w) watch[k] = { h };
+      else if (h !== w.h) w.new = h;
+      else delete w.new;
+    }
+    await saveWatch();
+    const n = Object.values(watch).filter((w) => w.new).length;
+    watchMsg = `${n ? `${n} changed` : "No changes"} · ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+  } finally {
+    checking = false; drawSync();
+    if (changedKeys() !== before && (!location.hash || location.hash === "#/") && !editing && !document.activeElement?.closest("input, textarea")) drawHome();
+  }
 }
 
 /** Add the sites that are not on the list yet (or enrich existing sites with missing group/desc); returns how many were added. */
@@ -100,40 +142,71 @@ async function copy(input: HTMLInputElement) {
   try { await navigator.clipboard.writeText(input.value); } catch { input.select(); } // the sandbox may refuse: leave it selected
 }
 
-// ---------------- sign-in box ----------------
+// ---------------- top bar: sign-in, publishing, monitoring ----------------
 function drawSync() {
   const box = app.querySelector<HTMLElement>("#sync");
   if (!box) return;
-  const share = me ? `${linkBase()}#/u/${personaName(me.persona)}` : "";
-  box.innerHTML = me === undefined ? `<p class="muted">Checking your sign-in…</p>`
-    : me ? `<p>Your list follows the ${key ? "identity" : "Viso persona"} <code>${esc(personaName(me.persona).slice(0, 12))}…</code> on every node.
-        <span class="muted">${esc(syncMsg)}</span> <button id="so" type="button" class="link">Sign out</button></p>
-        <div class="row wrap"><input id="share" readonly value="${esc(share)}" aria-label="Link to your list" /><button id="copyshare" type="button" class="ghost">Copy share link</button></div>
-        ${key ? `<p class="muted">This identity was made here: its key is the only way to get it back on another node. Keep it secret.
-          <button id="kshow" type="button" class="link">Show key</button> <button id="kdl" type="button" class="link">Download key</button></p>
-          <p><code id="kval" hidden>${esc(key)}</code></p>` : ""}`
-    : `<p><b>Same list on every node.</b> <span class="muted">Sign in and FH keeps your list on Freenet. It is public: anyone who knows your identity can read it, and you can share it.</span></p>
-        <div class="row wrap"><input id="vurl" value="${esc(officialViso())}" spellcheck="false" aria-label="Your Viso site" /><button id="vgo" type="button">Sign in with Viso</button></div>
-        <div class="row wrap"><button id="lnew" type="button" class="ghost">Create an identity here</button>
-          <input id="lkey" type="password" placeholder="…or paste your identity key" spellcheck="false" autocomplete="off" aria-label="Identity key" /><button id="limport" type="button" class="ghost">Use key</button></div>
-        <p class="err" role="alert">${esc(syncMsg)}</p>`;
+  const share = me && publishing ? `${linkBase()}#/u/${personaName(me.persona)}` : "";
+  const watchBtns = `<span class="spacer"></span><span class="muted">${esc(watchMsg)}</span>
+    ${watching ? `<button id="wnow" type="button" class="ghost" ${checking ? "disabled" : ""}>Check now</button>` : ""}
+    <button id="watch" type="button" class="ghost" aria-pressed="${watching}" title="Optional: compare each site's contract state with the last one you saw, and mark the ones that changed">Watch sites: ${watching ? "on" : "off"}</button>`;
+  box.innerHTML = me === undefined ? `<span class="muted">Checking your sign-in…</span>`
+    : me ? `<span>${key ? "Identity" : "Viso persona"} <code>${esc(personaName(me.persona).slice(0, 8))}…</code></span>
+        <button id="pub" type="button" class="ghost" aria-pressed="${publishing}" title="Off: your list stays on this node. On: it is kept on Freenet, synced across your nodes, and anyone who knows your identity can read it.">Publish list: ${publishing ? "on" : "off"}</button>
+        ${publishing ? `<button id="copyshare" type="button" class="ghost">Copy share link</button><input id="share" readonly hidden value="${esc(share)}" aria-label="Link to your list" />` : ""}
+        <span class="muted">${esc(syncMsg)}</span>
+        ${key ? `<button id="kshow" type="button" class="link">Backup key</button>` : ""}
+        <button id="so" type="button" class="link">Sign out</button>${watchBtns}
+        ${key ? `<div class="panel" id="kpanel" hidden><p class="muted">This identity was made here: its key is the only way to get it back on another node. Keep it secret.
+          <button id="kdl" type="button" class="link">Download key</button></p><p><code>${esc(key)}</code></p></div>` : ""}`
+    : `<span class="muted">Not signed in. Your list stays on this node.</span>
+        <button id="sin" type="button" class="ghost" aria-expanded="${signPanel}">Sign in</button>${watchBtns}
+        <div class="panel" ${signPanel ? "" : "hidden"}>
+          <p class="muted">Signing in only proves who you are: nothing is published until you turn on “Publish list”. A published list is public to anyone who knows your identity, so use a separate identity if you also use this Viso persona elsewhere (Radica, say).</p>
+          <div class="row wrap"><input id="vurl" value="${esc(officialViso())}" spellcheck="false" aria-label="Your Viso site" /><button id="vgo" type="button">Sign in with Viso</button></div>
+          <div class="row wrap"><button id="lnew" type="button" class="ghost">Create an identity here</button>
+            <input id="lkey" type="password" placeholder="…or paste your identity key" spellcheck="false" autocomplete="off" aria-label="Identity key" /><button id="limport" type="button" class="ghost">Use key</button></div>
+          <p class="err" role="alert">${esc(syncMsg)}</p>
+        </div>`;
   const on = (id: string, f: () => unknown) => { const b = box.querySelector<HTMLElement>(`#${id}`); if (b) b.onclick = f; };
-  const fail = (e: unknown) => { syncMsg = errText(e); drawSync(); };
+  const fail = (e: unknown) => { syncMsg = errText(e); signPanel = true; drawSync(); };
   on("so", async () => {
     if (key && !confirm("Signing out deletes the identity key from this node. Without your backup it is lost. Sign out?")) return;
     await signOut(); me = null; key = null; syncMsg = ""; drawSync();
   });
-  on("copyshare", () => copy(box.querySelector<HTMLInputElement>("#share")!));
-  on("kshow", () => { const k = box.querySelector<HTMLElement>("#kval")!; k.hidden = !k.hidden; });
+  on("sin", () => { signPanel = !signPanel; drawSync(); });
+  on("pub", async () => {
+    if (!me) return;
+    if (!publishing) {
+      publishing = true; await storePut("publish", "1"); await sync(); drawSync();
+      return;
+    }
+    if (!confirm("Stop publishing? Your list is emptied on the network (copies others already saved stay). Your list on this node is kept.")) return;
+    publishing = false; await storePut("publish", "");
+    try { await push(me, "[]", Date.now()); syncMsg = "Unpublished."; } catch (e) { syncMsg = `Could not empty the published list: ${errText(e)}`; }
+    drawSync();
+  });
+  on("copyshare", async () => {
+    const i = box.querySelector<HTMLInputElement>("#share")!;
+    try { await navigator.clipboard.writeText(i.value); syncMsg = "Share link copied."; drawSync(); }
+    catch { i.hidden = false; i.select(); } // the sandbox may refuse: show it selected
+  });
+  on("kshow", () => { const k = box.querySelector<HTMLElement>("#kpanel")!; k.hidden = !k.hidden; });
   on("kdl", () => {
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([`FH identity key: keep it secret.\n${key}\n`], { type: "text/plain" }));
     a.download = `identity-${personaName(me!.persona).slice(0, 8)}.txt`;
     a.click();
   });
+  on("watch", async () => {
+    watching = !watching; await storePut("watch", watching ? "1" : "");
+    watchMsg = ""; drawSync();
+    if (watching) checkSites();
+  });
+  on("wnow", () => checkSites());
   on("vgo", async () => { try { goTo(await startSignIn(box.querySelector<HTMLInputElement>("#vurl")!.value.trim())); } catch (e) { fail(e); } });
   const local = async (k?: string) => {
-    try { await createLocalIdentity(k); [me, key] = [await currentSession(), await localIdentityKey()]; await sync(); } catch (e) { fail(e); }
+    try { await createLocalIdentity(k); [me, key] = [await currentSession(), await localIdentityKey()]; signPanel = false; syncMsg = ""; await sync(); drawSync(); } catch (e) { fail(e); }
   };
   on("lnew", () => local());
   on("limport", () => local(box.querySelector<HTMLInputElement>("#lkey")!.value));
@@ -142,13 +215,14 @@ function drawSync() {
 // ---------------- tiles ----------------
 // Sites open in a new tab: the node refuses to have its app shells framed (X-Frame-Options: DENY, the shell
 // holds the app's identity token), and a popup escapes FH's sandbox, so the node wraps the site in its own shell.
+const badge = (k: string) => watch[k]?.new ? ` <span class="badge" title="Its contract state changed since you last opened it">updated</span>` : "";
 const tile = (s: Pick<Site, "name" | "key" | "hash"> & { group?: string; desc?: string }, extra: string) => {
   const desc = resolveDesc(s, dirDescs);
   return `
   <article class="tile" style="--h:${hue(s.key)}" data-key="${s.key}" data-find="${esc(`${s.name} ${s.group ?? ""} ${desc} ${s.key}`.toLowerCase())}">
     <a class="face" href="${esc(urlOf(s))}" target="_blank" rel="noopener noreferrer">
       <span class="glyph"><span class="letter">${esc([...s.name][0]?.toUpperCase() ?? "?")}</span><img alt="" loading="lazy" src="${nodeBase}/v1/contract/web/${s.key}/favicon.ico" /></span>
-      <span class="name">${esc(s.name)}</span>
+      <span class="name">${esc(s.name)}</span>${badge(s.key)}
       ${desc ? `<span class="desc" title="${esc(desc)}">${esc(desc)}</span>` : ""}
       <span class="key">${s.key.slice(0, 6)}…${s.key.slice(-4)}${esc(s.hash)}</span>
     </a>${extra}
@@ -174,7 +248,6 @@ function drawHome() {
 
   const eDesc = e ? resolveDesc(e, dirDescs) : "";
   const formHtml = `
-    <div class="grid">
       <form class="tile add" id="add">
         <p class="label">${e ? "Edit site" : "Add a site"}</p>
         <input name="name" placeholder="Name" maxlength="60" value="${esc(e?.name ?? "")}" aria-label="Name" />
@@ -184,8 +257,17 @@ function drawHome() {
         <textarea name="desc" placeholder="${e && !e.desc && eDesc ? `Description (inherited: ${esc(eDesc)})` : "Description (optional)"}" maxlength="200" rows="2" aria-label="Description">${esc(e?.desc ?? "")}</textarea>
         <p class="err" id="err" role="alert"></p>
         <div class="row"><button type="submit">${e ? "Save" : "Add"}</button>${e ? `<button type="button" id="cancel">Cancel</button>` : ""}</div>
-      </form>
-    </div>`;
+      </form>`;
+
+  const followHtml = `
+    <section class="group follow">
+      <h2>Following</h2>
+      <div class="row wrap">
+        ${follows.map((id) => `<span class="chip"><a href="#/u/${id}" title="${esc(id)}">${esc(id.slice(0, 8))}…</a><button type="button" data-unfollow="${id}" aria-label="Unfollow ${esc(id.slice(0, 8))}">&times;</button></span>`).join("")}
+        <form id="followf" class="row"><input name="id" required placeholder="Paste someone's share link to follow their list" aria-label="Share link or identity to follow" /><button type="submit">Follow</button></form>
+      </div>
+      <p class="err" id="ferr" role="alert"></p>
+    </section>`;
 
   const copyListHtml = `
     <details>
@@ -205,6 +287,7 @@ function drawHome() {
       </div>`;
 
     app.innerHTML = `
+      <section id="sync" class="sync topbar"></section>
       <header>
         <div class="header-top">
           <p class="kicker">Fisherman's Horizon</p>
@@ -213,19 +296,20 @@ function drawHome() {
         <h1>Your Freenet, in one place.</h1>
         <p class="lede">Pin the sites you use and open them from one place. <a href="#/apps">Find apps &rarr;</a></p>
       </header>
-      <section id="sync" class="sync"></section>
       ${sites.length ? `<input id="q" class="search" type="search" placeholder="Search your sites (Ctrl+K), Enter opens the first" aria-label="Search your sites" autocomplete="off" />` : ""}
       ${groups.map((g) => `
         <section class="group">
           ${g ? `<h2>${esc(g)}</h2>` : ""}
           <div class="grid">${sites.filter((s) => s.group === g).map((s) => tile(s, acts(s))).join("")}</div>
         </section>`).join("")}
+      ${followHtml}
       ${formHtml}
       ${copyListHtml}
       ${footer()}`;
   } else {
     // Minimal (Linkhorse) mode
     app.innerHTML = `
+      <section id="sync" class="sync topbar"></section>
       <div class="lh-layout">
         <aside class="lh-sidebar">
           <div class="lh-brand">
@@ -241,7 +325,6 @@ function drawHome() {
           </div>
         </aside>
         <main class="lh-main">
-          <section id="sync" class="sync"></section>
           ${sites.length ? `<input id="q" class="search" type="search" placeholder="Search your sites (Ctrl+K), Enter opens the first" aria-label="Search your sites" autocomplete="off" />` : ""}
           <div class="lh-groups">
             ${groups.map((g) => `
@@ -251,8 +334,8 @@ function drawHome() {
                   ${sites.filter((s) => s.group === g).map((s) => {
                     const desc = resolveDesc(s, dirDescs);
                     return `
-                    <li class="lh-item" data-find="${esc(`${s.name} ${s.group ?? ""} ${desc} ${s.key}`.toLowerCase())}">
-                      <a class="lh-link" href="${esc(urlOf(s))}" target="_blank" rel="noopener noreferrer">${esc(s.name)}</a>
+                    <li class="lh-item" data-key="${s.key}" data-find="${esc(`${s.name} ${s.group ?? ""} ${desc} ${s.key}`.toLowerCase())}">
+                      <a class="lh-link" href="${esc(urlOf(s))}" target="_blank" rel="noopener noreferrer">${esc(s.name)}</a>${badge(s.key)}
                       ${desc ? `<span class="lh-desc">${esc(desc)}</span>` : ""}
                       <div class="lh-acts">
                         <button data-edit="${s.key}" title="Edit" aria-label="Edit ${esc(s.name)}">&#9998;</button>
@@ -264,6 +347,7 @@ function drawHome() {
                 </ul>
               </section>`).join("")}
           </div>
+          ${followHtml}
           ${formHtml}
           ${copyListHtml}
           ${footer()}
@@ -314,6 +398,8 @@ function drawHome() {
   $<HTMLFormElement>("#add").onsubmit = async (ev) => {
     ev.preventDefault();
     const f = new FormData(ev.target as HTMLFormElement), raw = String(f.get("link")).trim(), err = $("#err");
+    const sid = raw.includes("#/u/") ? shareId(raw) : null; // a pasted share link: follow that list
+    if (sid) { await setFollow(sid, true); location.hash = `#/u/${sid}`; return; }
     let link = parseLink(raw);
     if (!link && parseName(raw)) {
       err.textContent = "Looking up the name on FreeNames…";
@@ -331,6 +417,14 @@ function drawHome() {
     drawHome();
     await save();
   };
+  $<HTMLFormElement>("#followf").onsubmit = async (ev) => {
+    ev.preventDefault();
+    const id = shareId(String(new FormData(ev.target as HTMLFormElement).get("id")));
+    if (fromBase58(id ?? "")?.length !== 32) return void ($("#ferr").textContent = "That is not a share link or identity.");
+    await setFollow(id!, true);
+    location.hash = `#/u/${id}`;
+  };
+  app.querySelectorAll<HTMLButtonElement>("[data-unfollow]").forEach((b) => (b.onclick = async () => { await setFollow(b.dataset.unfollow!, false); drawHome(); }));
   const descEl = $<HTMLTextAreaElement>("#add textarea[name=desc]");
   if (descEl) {
     descEl.onkeydown = (ev) => {
@@ -377,24 +471,22 @@ function drawHome() {
     };
   }
 
-  // drag a tile onto another to put it there, in that tile's group (the arrow buttons do the same from the keyboard)
-  if (viewMode === "tiles") {
-    app.querySelectorAll<HTMLElement>(".group .tile").forEach((t) => {
-      t.draggable = true;
-      t.ondragstart = (ev) => { ev.dataTransfer!.setData("text/plain", t.dataset.key!); t.classList.add("dragging"); };
-      t.ondragend = () => t.classList.remove("dragging");
-      t.ondragover = (ev) => { ev.preventDefault(); t.classList.add("over"); };
-      t.ondragleave = () => t.classList.remove("over");
-      t.ondrop = async (ev) => {
-        ev.preventDefault();
-        const from = ev.dataTransfer!.getData("text/plain");
-        if (!sites.some((s) => s.key === from)) return;
-        sites = moveSite(sites, from, t.dataset.key!);
-        drawHome();
-        await save();
-      };
-    });
-  }
+  // drag a site onto another to put it there, in that site's group (the arrow buttons do the same from the keyboard)
+  app.querySelectorAll<HTMLElement>(".group .tile, .lh-item").forEach((t) => {
+    t.draggable = true;
+    t.ondragstart = (ev) => { ev.dataTransfer!.setData("text/plain", t.dataset.key!); t.classList.add("dragging"); };
+    t.ondragend = () => t.classList.remove("dragging");
+    t.ondragover = (ev) => { ev.preventDefault(); t.classList.add("over"); };
+    t.ondragleave = () => t.classList.remove("over");
+    t.ondrop = async (ev) => {
+      ev.preventDefault();
+      const from = ev.dataTransfer!.getData("text/plain");
+      if (!sites.some((s) => s.key === from)) return;
+      sites = dropSite(sites, from, t.dataset.key!);
+      drawHome();
+      await save();
+    };
+  });
 }
 
 // ---------------- someone's shared list: #/u/<identity> ----------------
@@ -411,7 +503,7 @@ async function drawShared(id: string) {
     <header><p class="kicker">Shared list</p><h1>${shared.length} sites from <code>${esc(id.slice(0, 12))}…</code></h1>
       <p class="lede">${persona ? "Open them, or add them to your own list." : "This link is not a valid identity."}</p></header>
     ${shared.length ? `
-      <p class="row"><button id="all" type="button" class="cta">Add all to my list</button> <span id="msg" class="muted"></span></p>
+      <p class="row"><button id="all" type="button" class="cta">Add all to my list</button> <button id="fol" type="button" class="ghost cta"></button> <span id="msg" class="muted"></span></p>
       ${shared.length > 3 ? `<input id="q" class="search" type="search" placeholder="Search shared sites (Ctrl+K), Enter opens the first" aria-label="Search shared sites" autocomplete="off" />` : ""}
       ${groups.map((g) => `
         <section class="group">
@@ -421,6 +513,12 @@ async function drawShared(id: string) {
       : persona ? `<p class="muted">Nothing found: the list is empty, or no node answered.</p>` : ""}
     ${footer()}`;
   icons();
+  const fol = app.querySelector<HTMLButtonElement>("#fol");
+  if (fol) {
+    const label = () => (fol.textContent = follows.includes(id) ? "Following ✓" : "Follow this list");
+    label();
+    fol.onclick = async () => { await setFollow(id, !follows.includes(id)); label(); };
+  }
   const all = app.querySelector<HTMLButtonElement>("#all");
   if (all) all.onclick = async () => { const n = await addSites(shared); await drawShared(id); $("#msg").textContent = `${n} added.`; };
   app.querySelectorAll<HTMLButtonElement>("[data-take]").forEach((b) => (b.onclick = async () => {
@@ -829,6 +927,15 @@ if (query.has("viso") || query.has("whoiam")) { // back from Viso with its proof
   history.replaceState(null, "", location.pathname); // drop the one-time query
 }
 sites = parseSites(await storeGet("sites"));
+publishing = (await storeGet("publish")) === "1";
+follows = parseFollows(await storeGet("follows"));
+watching = (await storeGet("watch")) === "1";
+try {
+  const w = JSON.parse((await storeGet("watch-state")) ?? "{}");
+  for (const [k, v] of Object.entries<{ h?: unknown; new?: unknown }>(w)) {
+    if (typeof v?.h === "string") watch[k] = { h: v.h, ...(typeof v.new === "string" ? { new: v.new } : {}) };
+  }
+} catch { /* start fresh */ }
 const savedView = await storeGet("view-mode");
 if (savedView === "tiles" || savedView === "minimal") viewMode = savedView;
 const cachedDir = await storeGet("dir-cache");
@@ -841,6 +948,16 @@ key = me ? await localIdentityKey() : null;
 addEventListener("hashchange", route);
 route();
 await sync();
+if (watching) void checkSites();
+setInterval(() => void checkSites(), 10 * 60_000);
+
+// opening a site makes its current state the one to compare against
+document.addEventListener("click", (ev) => {
+  const a = (ev.target as HTMLElement).closest<HTMLElement>("a.face, a.lh-link"), box = a?.closest<HTMLElement>("[data-key]"), w = box && watch[box.dataset.key!];
+  if (!w?.new) return;
+  w.h = w.new; delete w.new; void saveWatch();
+  box!.querySelector(".badge")?.remove();
+});
 
 // Load the app directory in background to inherit descriptions and keep cache fresh
 loadDirectory().then(async (dirState) => {
