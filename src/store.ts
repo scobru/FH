@@ -155,6 +155,17 @@ export function getJson<T>(c: Contract): Promise<T | null> {
   return p;
 }
 
+/** blake3 (hex) of any contract's raw state, by its instance id; null if the network does not have it (or does not answer in time). */
+export function stateHash(instance: string): Promise<string | null> {
+  const run = () => retrying(async () => {
+    const r = await timeout((await api()).get(new GetRequest(ContractKey.fromInstanceId(instance), false)), 30_000);
+    return [...blake3(new Uint8Array(r.state))].map((b) => b.toString(16).padStart(2, "0")).join("");
+  }).catch(() => null);
+  const p = getChain.then(run);
+  getChain = p.catch(() => {});
+  return p;
+}
+
 /** Create the contract with this state, or merge it into the existing one. */
 export const putJson = async (c: Contract, state: object) =>
   (await api()).put(new PutRequest(new ContractContainer(ContractType.WasmContractV1,

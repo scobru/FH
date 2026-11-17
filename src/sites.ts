@@ -39,3 +39,20 @@ export function moveSite(sites: Site[], key: string, before: string | null): Sit
   const group = i < 0 ? s.group : rest[i].group;
   return [...rest.slice(0, at), { ...s, group }, ...rest.slice(at)];
 }
+
+/** Drop `key` onto `target`: it takes the target's place (after it when coming from the left, so dragging right works), in its group. */
+export function dropSite(sites: Site[], key: string, target: string): Site[] {
+  const f = sites.findIndex((x) => x.key === key), t = sites.findIndex((x) => x.key === target);
+  if (f < 0 || t < 0 || f === t) return sites;
+  const rest = sites.filter((_, i) => i !== f), at = rest.findIndex((x) => x.key === target) + (f < t ? 1 : 0);
+  return [...rest.slice(0, at), { ...sites[f], group: sites[t].group }, ...rest.slice(at)];
+}
+
+/** An identity from a share link (`…#/u/<id>`) or a bare base58 id; null if neither. */
+export const shareId = (s: string) => s.trim().match(/(?:#\/u\/)?([1-9A-HJ-NP-Za-km-z]{32,50})\/?$/)?.[1] ?? null;
+
+/** Ids from untrusted JSON (storage): well-formed, first copy of each. */
+export function parseFollows(json: string | null): string[] {
+  try { const a = JSON.parse(json ?? "[]"); return Array.isArray(a) ? [...new Set<string>(a.filter((x) => typeof x === "string" && shareId(x) === x))] : []; }
+  catch { return []; }
+}

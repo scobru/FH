@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { moveSite, parseLink, parseSites } from "./sites.ts";
+import { dropSite, moveSite, parseFollows, parseLink, parseSites, shareId } from "./sites.ts";
 
 const K = "4dg9mbpxeuMbQhh6Kr2ZjeHFtijMJAK5RoMbxT6rTyMP";
 
@@ -39,4 +39,21 @@ test("moveSite reorders and adopts the neighbour's group", () => {
   assert.deepEqual(moveSite(list, "a", "c").map((s) => [s.key, s.group, s.desc]), [["b", "g", "note b"], ["a", "g", ""], ["c", "g", "note c"]]);
   assert.deepEqual(moveSite(list, "b", null).map((s) => s.key), ["a", "c", "b"]);
   assert.equal(moveSite(list, "a", "a"), list);
+});
+
+test("dropSite works in both directions", () => {
+  const site = (key: string, group = "") => ({ name: key, key, hash: "", group, desc: "" });
+  const list = [site("a"), site("b"), site("c", "g")];
+  assert.deepEqual(dropSite(list, "a", "b").map((s) => s.key), ["b", "a", "c"]); // right: swaps with the neighbour
+  assert.deepEqual(dropSite(list, "a", "c").map((s) => [s.key, s.group]), [["b", ""], ["c", "g"], ["a", "g"]]);
+  assert.deepEqual(dropSite(list, "c", "a").map((s) => s.key), ["c", "a", "b"]); // left: before the target
+  assert.equal(dropSite(list, "a", "a"), list);
+});
+
+test("shareId and parseFollows", () => {
+  assert.equal(shareId(`https://h/v1/contract/web/${K}/#/u/${K.replace("4", "5")}`), K.replace("4", "5"));
+  assert.equal(shareId(` ${K} `), K);
+  assert.equal(shareId("nope"), null);
+  assert.deepEqual(parseFollows(JSON.stringify([K, K, "x", 1])), [K]);
+  assert.deepEqual(parseFollows("{"), []);
 });
