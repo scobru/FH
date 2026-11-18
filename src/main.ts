@@ -1,5 +1,5 @@
 import "./style.css";
-import { nodeBase, persistence, stateHash, storeGet, storePut } from "./store";
+import { nodeBase, onStateChange, persistence, stateHash, storeGet, storePut } from "./store";
 import { dropSite, hue, moveSite, parseFollows, parseLink, parseSites, shareId, type Site } from "./sites";
 import {
   createLocalIdentity, currentSession, finishSignIn, fromBase58, linkBase, localIdentityKey, officialViso,
@@ -53,6 +53,7 @@ async function save() {
   const ts = Date.now();
   await keepLocal(ts);
   if (me && publishing) await publish(me, ts);
+  void watchSites(); // new sites join the subscriptions
 }
 
 async function publish(who: Session, ts: number) {
@@ -82,33 +83,54 @@ const setFollow = async (id: string, on: boolean) => {
 };
 
 // ---- optional monitoring: has a site's contract state changed since the user last opened it? ----
+// One GET per site at start-up (subscribing) captures its state hash; after that the node tells us about updates.
 const saveWatch = () => storePut("watch-state", JSON.stringify(watch));
 const changedKeys = () => Object.keys(watch).filter((k) => watch[k].new).sort().join();
+const subscribed = new Set<string>();
 
-async function checkSites() {
+function noteHash(k: string, h: string) {
+  const w = watch[k];
+  if (!w) watch[k] = { h };
+  else if (h !== w.h) w.new = h;
+  else delete w.new;
+}
+
+const redrawIfChanged = (before: string) => {
+  if (changedKeys() !== before && (!location.hash || location.hash === "#/") && !editing && !document.activeElement?.closest("input, textarea")) drawHome();
+};
+
+/** Subscribe to the sites not yet watched (all of them with `all`, to refresh their hashes). */
+async function watchSites(all = false) {
   if (checking || !watching) return;
   checking = true;
-  const before = changedKeys(), keys = sites.map((s) => s.key);
+  const before = changedKeys(), keys = sites.map((s) => s.key), todo = keys.filter((k) => all || !subscribed.has(k));
   try {
     for (const k of Object.keys(watch)) if (!keys.includes(k)) delete watch[k];
-    for (const [i, k] of keys.entries()) {
-      watchMsg = `Checking ${i + 1}/${keys.length}…`; drawSync();
-      const h = await stateHash(k);
+    for (const [i, k] of todo.entries()) {
+      watchMsg = `Checking ${i + 1}/${todo.length}…`; drawSync();
+      const h = await stateHash(k, true);
       if (!watching) return;
-      if (!h) continue; // not reachable now: keep what we know
-      const w = watch[k];
-      if (!w) watch[k] = { h };
-      else if (h !== w.h) w.new = h;
-      else delete w.new;
+      if (!h) continue; // not reachable now: retried by "Check now"
+      subscribed.add(k);
+      noteHash(k, h);
     }
     await saveWatch();
     const n = Object.values(watch).filter((w) => w.new).length;
-    watchMsg = `${n ? `${n} changed` : "No changes"} · ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+    watchMsg = n ? `${n} changed` : "Watching";
   } finally {
-    checking = false; drawSync();
-    if (changedKeys() !== before && (!location.hash || location.hash === "#/") && !editing && !document.activeElement?.closest("input, textarea")) drawHome();
+    checking = false; drawSync(); redrawIfChanged(before);
   }
 }
+
+// the node reports an update: read the new state's hash (the delta alone does not give it)
+onStateChange(async (k) => {
+  if (!watching || !watch[k]) return;
+  const before = changedKeys(), h = await stateHash(k);
+  if (!h) return;
+  noteHash(k, h);
+  await saveWatch();
+  watchMsg = `${Object.values(watch).filter((w) => w.new).length} changed`; drawSync(); redrawIfChanged(before);
+});
 
 /** Add the sites that are not on the list yet (or enrich existing sites with missing group/desc); returns how many were added. */
 async function addSites(add: Site[]) {
@@ -148,8 +170,8 @@ function drawSync() {
   if (!box) return;
   const share = me && publishing ? `${linkBase()}#/u/${personaName(me.persona)}` : "";
   const watchBtns = `<span class="spacer"></span><span class="muted">${esc(watchMsg)}</span>
-    ${watching ? `<button id="wnow" type="button" class="ghost" ${checking ? "disabled" : ""}>Check now</button>` : ""}
-    <button id="watch" type="button" class="ghost" aria-pressed="${watching}" title="Optional: compare each site's contract state with the last one you saw, and mark the ones that changed">Watch sites: ${watching ? "on" : "off"}</button>`;
+    ${watching ? `<button id="wnow" type="button" class="ghost" ${checking ? "disabled" : ""} title="Read every site's state again">Refresh</button>` : ""}
+    <button id="watch" type="button" class="ghost" aria-pressed="${watching}" title="Optional: subscribe to each site's contract and mark the ones that changed since you last opened them">Watch sites: ${watching ? "on" : "off"}</button>`;
   box.innerHTML = me === undefined ? `<span class="muted">Checking your sign-in…</span>`
     : me ? `<span>${key ? "Identity" : "Viso persona"} <code>${esc(personaName(me.persona).slice(0, 8))}…</code></span>
         <button id="pub" type="button" class="ghost" aria-pressed="${publishing}" title="Off: your list stays on this node. On: it is kept on Freenet, synced across your nodes, and anyone who knows your identity can read it.">Publish list: ${publishing ? "on" : "off"}</button>
@@ -201,9 +223,9 @@ function drawSync() {
   on("watch", async () => {
     watching = !watching; await storePut("watch", watching ? "1" : "");
     watchMsg = ""; drawSync();
-    if (watching) checkSites();
+    if (watching) void watchSites();
   });
-  on("wnow", () => checkSites());
+  on("wnow", () => watchSites(true));
   on("vgo", async () => { try { goTo(await startSignIn(box.querySelector<HTMLInputElement>("#vurl")!.value.trim())); } catch (e) { fail(e); } });
   const local = async (k?: string) => {
     try { await createLocalIdentity(k); [me, key] = [await currentSession(), await localIdentityKey()]; signPanel = false; syncMsg = ""; await sync(); drawSync(); } catch (e) { fail(e); }
@@ -948,8 +970,7 @@ key = me ? await localIdentityKey() : null;
 addEventListener("hashchange", route);
 route();
 await sync();
-if (watching) void checkSites();
-setInterval(() => void checkSites(), 10 * 60_000);
+if (watching) void watchSites();
 
 // opening a site makes its current state the one to compare against
 document.addEventListener("click", (ev) => {
