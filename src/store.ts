@@ -21,6 +21,10 @@ export const nodeBase = import.meta.env.DEV
   ? `http://${import.meta.env.VITE_NODE ?? "127.0.0.1:7509"}`
   : `${location.protocol}//${location.host}`;
 
+let onChange: ((instance: string) => void) | undefined;
+/** Called with a contract's instance id (base58) whenever the node reports an update to one this page subscribed to. */
+export const onStateChange = (f: (instance: string) => void) => { onChange = f; };
+
 interface Waiter { resolve(r: DelegateResponse): void; reject(e: Error): void }
 const waiters: Waiter[] = [];
 let apiP: Promise<FreenetWsApi> | undefined;
@@ -28,7 +32,7 @@ let apiP: Promise<FreenetWsApi> | undefined;
 function api(): Promise<FreenetWsApi> {
   return (apiP ??= new Promise((resolve, reject) => {
     const h: ResponseHandler = {
-      onContractPut() {}, onContractGet() {}, onContractUpdate() {}, onContractUpdateNotification() {}, onContractNotFound() {},
+      onContractPut() {}, onContractGet() {}, onContractUpdate() {}, onContractUpdateNotification: (n) => onChange?.(n.key.encode()), onContractNotFound() {},
       onDelegateResponse: (r) => waiters.shift()?.resolve(r),
       onErr: (e) => console.error(e.cause),
       onOpen: () => resolve(a),
@@ -155,10 +159,10 @@ export function getJson<T>(c: Contract): Promise<T | null> {
   return p;
 }
 
-/** blake3 (hex) of any contract's raw state, by its instance id; null if the network does not have it (or does not answer in time). */
-export function stateHash(instance: string): Promise<string | null> {
+/** blake3 (hex) of any contract's raw state, by its instance id (with `subscribe`, the node then reports its updates to `onStateChange`); null if the network does not have it (or does not answer in time). */
+export function stateHash(instance: string, subscribe = false): Promise<string | null> {
   const run = () => retrying(async () => {
-    const r = await timeout((await api()).get(new GetRequest(ContractKey.fromInstanceId(instance), false)), 30_000);
+    const r = await timeout((await api()).get(new GetRequest(ContractKey.fromInstanceId(instance), false, subscribe)), 30_000);
     return [...blake3(new Uint8Array(r.state))].map((b) => b.toString(16).padStart(2, "0")).join("");
   }).catch(() => null);
   const p = getChain.then(run);
