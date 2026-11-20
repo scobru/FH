@@ -148,6 +148,7 @@ const timeout = <T>(p: Promise<T>, ms: number) =>
 
 // get() responses are matched by arrival order: one at a time
 let getChain: Promise<unknown> = Promise.resolve();
+let watchChain: Promise<unknown> = Promise.resolve();
 /** A contract's JSON state, or null if the network does not have it (or does not answer in time). */
 export function getJson<T>(c: Contract): Promise<T | null> {
   const run = () => retrying(async () => {
@@ -161,12 +162,13 @@ export function getJson<T>(c: Contract): Promise<T | null> {
 
 /** blake3 (hex) of any contract's raw state, by its instance id (with `subscribe`, the node then reports its updates to `onStateChange`); null if the network does not have it (or does not answer in time). */
 export function stateHash(instance: string, subscribe = false): Promise<string | null> {
+  // its own queue and a short timeout: scanning many sites must never hold up the page's other reads (getJson)
   const run = () => retrying(async () => {
-    const r = await timeout((await api()).get(new GetRequest(ContractKey.fromInstanceId(instance), false, subscribe)), 30_000);
+    const r = await timeout((await api()).get(new GetRequest(ContractKey.fromInstanceId(instance), false, subscribe)), 10_000);
     return [...blake3(new Uint8Array(r.state))].map((b) => b.toString(16).padStart(2, "0")).join("");
   }).catch(() => null);
-  const p = getChain.then(run);
-  getChain = p.catch(() => {});
+  const p = watchChain.then(run);
+  watchChain = p.catch(() => {});
   return p;
 }
 
