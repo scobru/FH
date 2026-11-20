@@ -87,6 +87,7 @@ const setFollow = async (id: string, on: boolean) => {
 const saveWatch = () => storePut("watch-state", JSON.stringify(watch));
 const changedKeys = () => Object.keys(watch).filter((k) => watch[k].new).sort().join();
 const subscribed = new Set<string>();
+const setWatchMsg = (m: string) => { watchMsg = m; const e = app.querySelector<HTMLElement>("#wmsg"); if (e) e.textContent = m; }; // no full redraw: it would steal focus
 
 function noteHash(k: string, h: string) {
   const w = watch[k];
@@ -107,8 +108,9 @@ async function watchSites(all = false) {
   try {
     for (const k of Object.keys(watch)) if (!keys.includes(k)) delete watch[k];
     for (const [i, k] of todo.entries()) {
-      watchMsg = `Checking ${i + 1}/${todo.length}…`; drawSync();
+      setWatchMsg(`Checking ${i + 1}/${todo.length}…`);
       const h = await stateHash(k, true);
+      await new Promise((r) => setTimeout(r, 150)); // let the page breathe between big states
       if (!watching) return;
       if (!h) continue; // not reachable now: retried by "Check now"
       subscribed.add(k);
@@ -169,7 +171,7 @@ function drawSync() {
   const box = app.querySelector<HTMLElement>("#sync");
   if (!box) return;
   const share = me && publishing ? `${linkBase()}#/u/${personaName(me.persona)}` : "";
-  const watchBtns = `<span class="spacer"></span><span class="muted">${esc(watchMsg)}</span>
+  const watchBtns = `<span class="spacer"></span><span class="muted" id="wmsg">${esc(watchMsg)}</span>
     ${watching ? `<button id="wnow" type="button" class="ghost" ${checking ? "disabled" : ""} title="Read every site's state again">Refresh</button>` : ""}
     <button id="watch" type="button" class="ghost" aria-pressed="${watching}" title="Optional: subscribe to each site's contract and mark the ones that changed since you last opened them">Watch sites: ${watching ? "on" : "off"}</button>`;
   box.innerHTML = me === undefined ? `<span class="muted">Checking your sign-in…</span>`
@@ -972,7 +974,7 @@ key = me ? await localIdentityKey() : null;
 addEventListener("hashchange", route);
 route();
 await sync();
-if (watching) void watchSites();
+if (watching) setTimeout(() => void watchSites(), 3000); // after the page is usable
 
 // opening a site makes its current state the one to compare against
 document.addEventListener("click", (ev) => {
