@@ -914,11 +914,13 @@ function route() {
 document.addEventListener("click", async (ev) => {
   const b = (ev.target as HTMLElement).closest<HTMLElement>("[data-edit],[data-del],[data-left],[data-right]");
   if (!b) return;
-  const d = b.dataset, moved = d.left ?? d.right, i = sites.findIndex((s) => s.key === moved);
+  const d = b.dataset, moved = d.left ?? d.right;
+  // neighbours are the ones shown next to it: same group, in list order (not the whole list's order)
+  const mates = sites.filter((x) => x.group === sites.find((s) => s.key === moved)?.group), i = mates.findIndex((s) => s.key === moved);
   if (d.edit) { editing = d.edit; drawHome(); $<HTMLElement>("#add")?.scrollIntoView({ behavior: "smooth" }); $<HTMLInputElement>("input[name=name]").focus(); return; }
   if (d.del) sites = sites.filter((s) => s.key !== d.del);
-  else if (d.left && i > 0) sites = moveSite(sites, d.left, sites[i - 1].key);
-  else if (d.right && i >= 0 && i < sites.length - 1) sites = moveSite(sites, sites[i + 1].key, d.right);
+  else if (d.left && i > 0) sites = moveSite(sites, d.left, mates[i - 1].key);
+  else if (d.right && i >= 0 && i < mates.length - 1) sites = moveSite(sites, mates[i + 1].key, d.right);
   else return;
   drawHome();
   if (moved) app.querySelector<HTMLElement>(`[data-${d.left ? "left" : "right"}="${moved}"]`)?.focus(); // keep the keyboard on the moved tile
